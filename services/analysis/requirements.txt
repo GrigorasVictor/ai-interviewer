@@ -1,0 +1,5 @@
+litellm==1.106.2
+neo4j>=5.20
+nltk>=3.9
+pydantic>=2.7,<3
+python-dotenv>=1.0

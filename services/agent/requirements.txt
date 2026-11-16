@@ -1,4 +1,5 @@
 google-adk==2.14.1
 litellm==1.106.2
+mcp>=2.3
 pydantic>=2.7,<3
 python-dotenv>=1.0

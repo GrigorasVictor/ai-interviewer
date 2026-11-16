@@ -17,7 +17,8 @@ from dotenv import load_dotenv
 from google.adk.models import LiteLlm
 
 # Load the repo-root `.env` if present (no-op in Docker where env vars are injected by Compose).
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_PARENTS = Path(__file__).resolve().parents
+_REPO_ROOT = _PARENTS[3] if len(_PARENTS) > 3 else _PARENTS[-1]
 load_dotenv(_REPO_ROOT / ".env", override=False)
 
 

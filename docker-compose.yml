@@ -1,0 +1,74 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: interviewer-neo4j
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-interviewer-dev-123}
+      NEO4J_server_memory_heap_max__size: 1G
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    restart: unless-stopped
+
+  mcp:
+    build:
+      context: .
+      dockerfile: services/mcp/Dockerfile
+    container_name: interviewer-mcp
+    env_file:
+      - .env
+    environment:
+      MCP_PORT: 8001
+      DATA_DIR: /app/data
+    ports:
+      - "${MCP_PORT:-8001}:8001"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: services/agent/Dockerfile
+    container_name: interviewer-agent
+    depends_on:
+      - mcp
+    env_file:
+      - .env
+    environment:
+      MCP_SERVER_URL: http://mcp:8001/mcp
+      OLLAMA_API_BASE: ${OLLAMA_API_BASE_DOCKER:-http://host.docker.internal:11434}
+      DATA_DIR: /app/data
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  analysis:
+    build:
+      context: .
+      dockerfile: services/analysis/Dockerfile
+    container_name: interviewer-analysis
+    depends_on:
+      - neo4j
+    env_file:
+      - .env
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      OLLAMA_API_BASE: ${OLLAMA_API_BASE_DOCKER:-http://host.docker.internal:11434}
+      DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  neo4j_data:
+  neo4j_logs:

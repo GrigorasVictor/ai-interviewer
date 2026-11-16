@@ -1,12 +1,19 @@
-"""Shared data contracts and state-machine definitions for the Mini AI Interviewer.
-
-Used by both services (`agent` and `mcp`) so that every payload, state enum,
-transition map, and queue operation has a single source of truth in `shared/contracts`.
-"""
+"""Shared data contracts, prompts, and state-machine definitions for the Mini AI Interviewer."""
 
 from .common import SCHEMA_VERSION, Score, SentimentLabel, utc_now_iso
 from .llm_outputs import IntakeResult, InterviewerTurn, InterviewSummary, Rubric, RubricArea
 from .nlp import AnalyzeAnswersResult, AnswerAnalysis, AnswerInput, Keyword, NlpModels, Sentiment
+from .prompts import (
+    DONE_PHASE_PROMPT,
+    FOLLOWUP_QUEUE_PHASE_PROMPT,
+    INSIGHTS_SYSTEM_PROMPT,
+    INSIGHTS_USER_PROMPT,
+    INTAKE_PHASE_PROMPT,
+    MAIN_QUEUE_PHASE_PROMPT,
+    PHASE_PROMPTS,
+    SUMMARY_SYSTEM_PROMPT,
+    SUMMARY_USER_PROMPT,
+)
 from .record import SKIPPED_ANSWER, InterviewRecord, ModelsUsed, TranscriptTurn, UserRef
 from .state_machine import (
     ALLOWED_TOOLS_BY_PHASE,
@@ -26,6 +33,7 @@ from .state_machine import (
     apply_start_interview_to_state,
     collect_user_messages_text,
     finish_and_persist_if_needed,
+    load_user_interview,
     parse_num_questions_env,
     persist_interview_to_json,
     reset_interview_state,
@@ -33,22 +41,32 @@ from .state_machine import (
     slugify,
     stop_interview_state,
     transition_phase,
+    user_json_path,
 )
 from .storage import InterviewListItem, JsonSaveStatus, Neo4jSaveStatus, ResyncResult, SaveInterviewResult
 
 __all__ = [
     "ALLOWED_TOOLS_BY_PHASE",
+    "DONE_PHASE_PROMPT",
     "END_ACTIONS",
+    "FOLLOWUP_QUEUE_PHASE_PROMPT",
+    "INSIGHTS_SYSTEM_PROMPT",
+    "INSIGHTS_USER_PROMPT",
+    "INTAKE_PHASE_PROMPT",
+    "MAIN_QUEUE_PHASE_PROMPT",
     "MAX_FOLLOWUPS",
     "MAX_QUESTIONS",
     "MIN_ANSWER_WORDS",
     "MIN_QUESTIONS",
+    "PHASE_PROMPTS",
     "RESTART_COMMANDS",
     "SCHEMA_VERSION",
     "SKIP_COMMANDS",
     "SKIPPED_ANSWER",
     "STATE_MACHINE_TRANSITIONS",
     "STOP_COMMANDS",
+    "SUMMARY_SYSTEM_PROMPT",
+    "SUMMARY_USER_PROMPT",
     "AnalyzeAnswersResult",
     "AnswerAnalysis",
     "AnswerInput",
@@ -78,6 +96,7 @@ __all__ = [
     "apply_start_interview_to_state",
     "collect_user_messages_text",
     "finish_and_persist_if_needed",
+    "load_user_interview",
     "parse_num_questions_env",
     "persist_interview_to_json",
     "reset_interview_state",
@@ -85,5 +104,6 @@ __all__ = [
     "slugify",
     "stop_interview_state",
     "transition_phase",
+    "user_json_path",
     "utc_now_iso",
 ]

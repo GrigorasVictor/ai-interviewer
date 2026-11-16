@@ -52,14 +52,14 @@ def test_intake_blocks_hallucinated_name_or_topic() -> None:
     assert state["phase"] == str(Phase.INTAKE)
 
 
-def test_two_queues_main_then_followup_then_programmatic_save(
+def test_two_queues_main_then_followup_then_per_user_json_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Drains `question_queue` via `.pop(0)`, pushes to `followup_queue`, drains `followup_queue`, and auto-saves JSON."""
+    """Drains `question_queue` via `.pop(0)`, pushes to `followup_queue`, drains `followup_queue`, and saves `data/<user_id>.json`."""
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     state: dict[str, Any] = {"phase": str(Phase.INTAKE)}
 
-    # 1. `start_interview` populates `question_queue` with 3 questions and immediately pops Q1.
+    # 1. `start_interview` populates `question_queue` with 3 questions, pops Q1, and writes `data/victor.json`.
     started = apply_start_interview_to_state(
         state,
         user_name="Victor",
@@ -73,10 +73,11 @@ def test_two_queues_main_then_followup_then_programmatic_save(
     )
     assert started["status"] == "ready"
     assert state["phase"] == str(Phase.MAIN_QUEUE)
+    assert state["user_id"] == "victor"
     assert state["current_question"] == "How does AI fit into your daily workflow?"
     assert len(state["question_queue"]) == 2
     assert state["followup_queue"] == []
-    assert state["saved_to_disk"] is False
+    assert (tmp_path / "victor.json").exists()
 
     # 2. User answers Q1 -> `advance_queues_on_user_answer` pops Q2 from `question_queue`.
     phase = advance_queues_on_user_answer(
@@ -125,7 +126,7 @@ def test_two_queues_main_then_followup_then_programmatic_save(
     )
     assert blocked["status"] == "ignored"
 
-    # 5. User answers the follow-up -> both queues are empty -> programmatically transitions to `DONE` and saves JSON!
+    # 5. User answers the follow-up -> both queues are empty -> programmatically transitions to `DONE` and saves `victor.json`!
     phase = advance_queues_on_user_answer(
         state,
         "We run mutation testing and require a human review on every assertion.",
@@ -133,16 +134,29 @@ def test_two_queues_main_then_followup_then_programmatic_save(
     assert phase == Phase.DONE
     assert state["current_question"] is None
     assert len(state["transcript"]) == 4
-    assert state["saved_to_disk"] is True
 
-    saved_file = Path(state["saved_path"])
+    saved_file = tmp_path / "victor.json"
     assert saved_file.exists()
-    records = json.loads(saved_file.read_text(encoding="utf-8"))
-    assert len(records) == 1
-    assert records[0]["status"] == "pending_analysis"
-    assert "summary" not in records[0]
+    record = json.loads(saved_file.read_text(encoding="utf-8"))
+    assert record["user_id"] == "victor"
+    assert record["status"] == "pending_analysis"
+    assert "saved_to_disk" not in record
+    assert "saved_path" not in record
+    assert "summary" not in record
 
-    # 6. `reset_interview_state` resets back to `intake`.
+    # 6. Starting an interview for a second user creates a second JSON file (`alex.json`).
+    state2: dict[str, Any] = {"phase": str(Phase.INTAKE)}
+    apply_start_interview_to_state(
+        state2,
+        user_name="Alex",
+        topic="Remote work",
+        questions=["Q1?", "Q2?", "Q3?"],
+        user_history="I am Alex and I want to discuss Remote work",
+    )
+    assert (tmp_path / "alex.json").exists()
+    assert (tmp_path / "victor.json").exists()
+
+    # 7. `reset_interview_state` resets back to `intake`.
     restarted = reset_interview_state(state)
     assert restarted["status"] == "restarted"
     assert state["phase"] == str(Phase.INTAKE)
@@ -174,7 +188,7 @@ def test_mcp_toolset_http_and_phase_prompts(
     )
     assert ctx.state["current_question"] == "Q1?"
     assert ctx.state["question_queue"] == ["Q2?"]
-    assert "Phase:** `main_queue`" in build_harness_instruction(ctx)  # type: ignore[arg-type]
+    assert "Current State: `main_queue`" in build_harness_instruction(ctx)  # type: ignore[arg-type]
 
     # Short answer ("ok") on Q1 auto-pushes a clarification follow-up onto `followup_queue` and pops Q2.
     advance_queues_on_user_answer(ctx.state, "ok")
@@ -184,12 +198,12 @@ def test_mcp_toolset_http_and_phase_prompts(
     # Answering Q2 drains `question_queue` and transitions to `followup_queue`.
     advance_queues_on_user_answer(ctx.state, "I verify everything manually before merging.")
     assert ctx.state["phase"] == str(Phase.FOLLOWUP_QUEUE)
-    assert "Phase:** `followup_queue`" in build_harness_instruction(ctx)  # type: ignore[arg-type]
+    assert "Current State: `followup_queue`" in build_harness_instruction(ctx)  # type: ignore[arg-type]
 
-    # Answering the follow-up drains `followup_queue`, transitions to `done`, and saves automatically.
+    # Answering the follow-up drains `followup_queue`, transitions to `done`, and saves `victor.json`.
     advance_queues_on_user_answer(ctx.state, "Specifically I use it for summarizing daily emails.")
     assert ctx.state["phase"] == str(Phase.DONE)
-    assert ctx.state["saved_to_disk"] is True
+    assert (tmp_path / "victor.json").exists()
     done_prompt = build_harness_instruction(ctx)  # type: ignore[arg-type]
     assert "Current State: `done`" in done_prompt
     assert "do NOT generate a summary in chat" in done_prompt

@@ -1,4 +1,4 @@
-mcp>=1.6
+mcp>=2.3
+uvicorn>=0.30
 pydantic>=2.7,<3
 python-dotenv>=1.0
-# Stage 3 (M2/M4) will add: torch (CPU wheel), transformers, keybert, sentence-transformers, neo4j
