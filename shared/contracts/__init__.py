@@ -1,23 +1,54 @@
-"""Shared data contracts for the Mini AI Interviewer.
+"""Shared data contracts and state-machine definitions for the Mini AI Interviewer.
 
-Used by both services (agent and mcp) so that every payload crossing a
-service boundary has exactly one definition. Spec: .agents/DATA_MODEL.md
-
-    llm_outputs  what the LLM returns (Rubric, InterviewerTurn, InterviewSummary, ...)
-    nlp          sentiment / keyphrase tool payloads
-    record       the persisted InterviewRecord
-    storage      save / list / resync tool payloads
+Used by both services (`agent` and `mcp`) so that every payload, state enum,
+transition map, and queue operation has a single source of truth in `shared/contracts`.
 """
 
 from .common import SCHEMA_VERSION, Score, SentimentLabel, utc_now_iso
 from .llm_outputs import IntakeResult, InterviewerTurn, InterviewSummary, Rubric, RubricArea
 from .nlp import AnalyzeAnswersResult, AnswerAnalysis, AnswerInput, Keyword, NlpModels, Sentiment
 from .record import SKIPPED_ANSWER, InterviewRecord, ModelsUsed, TranscriptTurn, UserRef
+from .state_machine import (
+    ALLOWED_TOOLS_BY_PHASE,
+    END_ACTIONS,
+    MAX_FOLLOWUPS,
+    MAX_QUESTIONS,
+    MIN_ANSWER_WORDS,
+    MIN_QUESTIONS,
+    RESTART_COMMANDS,
+    SKIP_COMMANDS,
+    STATE_MACHINE_TRANSITIONS,
+    STOP_COMMANDS,
+    Phase,
+    Signal,
+    advance_queues_on_user_answer,
+    apply_push_followup_to_state,
+    apply_start_interview_to_state,
+    collect_user_messages_text,
+    finish_and_persist_if_needed,
+    parse_num_questions_env,
+    persist_interview_to_json,
+    reset_interview_state,
+    resolve_data_dir,
+    slugify,
+    stop_interview_state,
+    transition_phase,
+)
 from .storage import InterviewListItem, JsonSaveStatus, Neo4jSaveStatus, ResyncResult, SaveInterviewResult
 
 __all__ = [
+    "ALLOWED_TOOLS_BY_PHASE",
+    "END_ACTIONS",
+    "MAX_FOLLOWUPS",
+    "MAX_QUESTIONS",
+    "MIN_ANSWER_WORDS",
+    "MIN_QUESTIONS",
+    "RESTART_COMMANDS",
     "SCHEMA_VERSION",
+    "SKIP_COMMANDS",
     "SKIPPED_ANSWER",
+    "STATE_MACHINE_TRANSITIONS",
+    "STOP_COMMANDS",
     "AnalyzeAnswersResult",
     "AnswerAnalysis",
     "AnswerInput",
@@ -31,6 +62,7 @@ __all__ = [
     "ModelsUsed",
     "Neo4jSaveStatus",
     "NlpModels",
+    "Phase",
     "ResyncResult",
     "Rubric",
     "RubricArea",
@@ -38,7 +70,20 @@ __all__ = [
     "Score",
     "Sentiment",
     "SentimentLabel",
+    "Signal",
     "TranscriptTurn",
     "UserRef",
+    "advance_queues_on_user_answer",
+    "apply_push_followup_to_state",
+    "apply_start_interview_to_state",
+    "collect_user_messages_text",
+    "finish_and_persist_if_needed",
+    "parse_num_questions_env",
+    "persist_interview_to_json",
+    "reset_interview_state",
+    "resolve_data_dir",
+    "slugify",
+    "stop_interview_state",
+    "transition_phase",
     "utc_now_iso",
 ]
