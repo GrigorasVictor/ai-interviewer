@@ -1,0 +1,14 @@
+# Build context is the repo root; only shared/ and services/ are needed in images.
+.git
+.idea
+.venv
+.agents
+.env
+sample.env
+data
+tests
+my_agent
+**/__pycache__
+**/*.pyc
+**/.adk
+**/*.egg-info

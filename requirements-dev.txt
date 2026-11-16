@@ -1,0 +1,6 @@
+# Local development (outside Docker), from the repo root:
+#   .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+-e ./shared
+-r services/agent/requirements.txt
+-r services/mcp/requirements.txt
+pytest>=8
