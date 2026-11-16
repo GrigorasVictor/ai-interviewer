@@ -12,15 +12,18 @@ How the Two-Queue architecture works (zero counters — only `.pop(0)` and `.app
    - In `Phase.FOLLOWUP_QUEUE`, `push_followup` is NOT in `ALLOWED_TOOLS_BY_PHASE`, so
      the LLM cannot push a follow-up to a follow-up; it simply asks:
      "Previously you mentioned <context> — <follow_up_question>?"
-3. `Phase.DONE` (Both queues empty):
-   - As soon as both `question_queue` and `followup_queue` are empty (`[]`), Python
-     transitions to `Phase.DONE`, the LLM generates the final summary, and
-     `_persist_completed_interview` saves the transcript + summary to `data/interviews_output.json`.
+3. Automatic programmatic completion & save (`Phase.DONE`):
+   - As soon as `advance_queues_on_user_answer` detects that both `question_queue` and
+     `followup_queue` are empty (`[]`), it programmatically transitions to `Phase.DONE`
+     and immediately calls `persist_interview_to_json(state)` (no LLM `end_interview`
+     tool call or chat summary needed; analysis/summarization is delegated to a separate
+     microservice).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from enum import StrEnum
@@ -32,13 +35,7 @@ from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools import ToolContext
 from google.adk.workflow import RetryConfig
 
-from .agents.prompts import (
-    DONE_PHASE_PROMPT,
-    FOLLOWUP_QUEUE_PHASE_PROMPT,
-    INTAKE_PHASE_PROMPT,
-    MAIN_QUEUE_PHASE_PROMPT,
-    PHASE_PROMPTS,
-)
+from .agents.prompts import PHASE_PROMPTS
 from .config import _REPO_ROOT, build_llm, load_settings
 from .schemas import SKIPPED_ANSWER, IntakeResult, utc_now_iso
 
@@ -106,12 +103,14 @@ STATE_MACHINE_TRANSITIONS: dict[Phase, dict[Signal, Phase]] = {
 }
 
 # Which tools the LLM can call in each `Phase`.
-# Notice `push_followup` is ONLY allowed in `MAIN_QUEUE`, NEVER in `FOLLOWUP_QUEUE`!
+# Notice:
+# - `push_followup` is ONLY allowed in `MAIN_QUEUE`, NEVER in `FOLLOWUP_QUEUE`.
+# - Ending & saving when both queues empty is 100% programmatic in Python (no LLM tool needed in `FOLLOWUP_QUEUE` or `DONE`).
 ALLOWED_TOOLS_BY_PHASE: dict[Phase, set[str]] = {
     Phase.INTAKE:         {"start_interview"},
-    Phase.MAIN_QUEUE:     {"push_followup", "end_interview"},
-    Phase.FOLLOWUP_QUEUE: {"end_interview"},
-    Phase.DONE:           {"end_interview"},
+    Phase.MAIN_QUEUE:     {"push_followup"},
+    Phase.FOLLOWUP_QUEUE: set(),
+    Phase.DONE:           set(),
 }
 
 
@@ -149,8 +148,61 @@ def _extract_current_user_text(ctx: Any) -> str:
 
 
 # ==============================================================================
-# 2. Queue Operations (`.pop(0)` and `.append()` — No Counters)
+# 2. Programmatic Persistence & Queue Advancement (`.pop(0)` / `.append()`)
 # ==============================================================================
+
+
+def _resolve_data_dir() -> Path:
+    raw = os.getenv("DATA_DIR", "").strip()
+    if not raw:
+        return _REPO_ROOT / "data"
+    candidate = Path(raw)
+    return candidate if candidate.is_absolute() else (_REPO_ROOT / candidate)
+
+
+def persist_interview_to_json(state: Any) -> Path:
+    """Programmatically save the completed interview transcript to `data/interviews_output.json`."""
+    data_dir = _resolve_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    output_file = data_dir / "interviews_output.json"
+
+    existing: list[dict[str, Any]] = []
+    if output_file.exists():
+        try:
+            loaded = json.loads(output_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                existing = loaded
+        except Exception:
+            existing = []
+
+    record = {
+        "interview_id": state.get("interview_id") or str(uuid.uuid4()),
+        "user_id": state.get("user_id") or "participant",
+        "user_name": state.get("user_name") or "Participant",
+        "topic": state.get("topic") or "",
+        "status": "pending_analysis",
+        "completed_at": utc_now_iso(),
+        "transcript": list(state.get("transcript") or []),
+    }
+
+    existing = [item for item in existing if item.get("interview_id") != record["interview_id"]]
+    existing.append(record)
+    output_file.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+    state["saved_to_disk"] = True
+    state["saved_path"] = str(output_file)
+    return output_file
+
+
+def _finish_and_persist_if_needed(state: Any, signal: Signal) -> Phase:
+    """Transition to `Phase.DONE` and automatically persist to `data/interviews_output.json`."""
+    state["question_queue"] = []
+    state["followup_queue"] = []
+    state["current_question"] = None
+    state["current_followup_context"] = None
+    next_phase = _transition(state, signal)
+    if state.get("transcript") and not state.get("saved_to_disk"):
+        persist_interview_to_json(state)
+    return next_phase
 
 
 def advance_queues_on_user_answer(state: Any, user_text: str) -> Phase:
@@ -159,14 +211,14 @@ def advance_queues_on_user_answer(state: Any, user_text: str) -> Phase:
     Priority order:
     1. If `question_queue` is non-empty -> `question_queue.pop(0)` (`Phase.MAIN_QUEUE`)
     2. Else if `followup_queue` is non-empty -> `followup_queue.pop(0)` (`Phase.FOLLOWUP_QUEUE`)
-    3. Else -> both queues are empty (`Phase.DONE`)
+    3. Else -> both queues are empty -> programmatically transition to `Phase.DONE`
+       and save immediately via `persist_interview_to_json(state)`.
     """
     cleaned = user_text.strip()
     lower = cleaned.lower()
 
     if lower in STOP_COMMANDS:
-        state["current_question"] = None
-        return _transition(state, Signal.STOP)
+        return _finish_and_persist_if_needed(state, Signal.STOP)
 
     if lower in RESTART_COMMANDS:
         _handle_restart(state)
@@ -227,9 +279,7 @@ def advance_queues_on_user_answer(state: Any, user_text: str) -> Phase:
         state["current_followup_context"] = next_item["context"]
         return _transition(state, Signal.POP_FOLLOWUP)
 
-    state["current_question"] = None
-    state["current_followup_context"] = None
-    return _transition(state, Signal.QUEUES_EMPTY)
+    return _finish_and_persist_if_needed(state, Signal.QUEUES_EMPTY)
 
 
 # ==============================================================================
@@ -371,6 +421,23 @@ def push_followup(
     state["followup_queue"] = followup_queue
     state["pushed_this_turn"] = True
 
+    # If `current_question` was None (meaning the user just answered the last main question
+    # before `push_followup` was called), pop the newly pushed follow-up immediately.
+    if not state.get("current_question"):
+        next_item = followup_queue.pop(0)
+        state["followup_queue"] = followup_queue
+        state["current_question"] = next_item["question"]
+        state["current_followup_context"] = next_item["context"]
+        _transition(state, Signal.POP_FOLLOWUP)
+        return {
+            "status": "popped_followup_immediately",
+            "phase": state["phase"],
+            "next_step": (
+                f"Ask this follow-up question now, referencing '{next_item['context']}': "
+                f"'{next_item['question']}'"
+            ),
+        }
+
     return {
         "status": "pushed_to_followup_queue",
         "followup_queue_size": len(followup_queue),
@@ -406,20 +473,14 @@ def _handle_restart(state: Any) -> dict[str, Any]:
 
 
 def _handle_stop(state: Any) -> dict[str, Any]:
-    state["question_queue"] = []
-    state["followup_queue"] = []
-    state["current_question"] = None
-    _transition(state, Signal.STOP)
+    _finish_and_persist_if_needed(state, Signal.STOP)
     transcript = list(state.get("transcript") or [])
     return {
         "status": "stopped",
         "phase": state["phase"],
         "answers_recorded": len(transcript),
-        "transcript": transcript,
-        "next_step": (
-            "Thank the participant. If `answers_recorded` > 0, provide a brief qualitative summary "
-            "of the answers collected so far; otherwise let them know they can say `restart` anytime."
-        ),
+        "saved_to_disk": bool(state.get("saved_to_disk")),
+        "next_step": "Thank the participant and let them know the interview has been closed.",
     }
 
 
@@ -435,52 +496,14 @@ def end_interview(
     action: str,
     tool_context: ToolContext,
 ) -> dict[str, Any]:
-    """Stop the current interview early or restart a fresh interview session.
-
-    Args:
-        action: Either 'stop' (end current interview early) or 'restart' (reset state to start a new interview).
-    """
+    """Programmatic helper to stop or restart an interview session."""
     handler = END_ACTIONS.get(action.strip().lower(), _handle_stop)
     return handler(tool_context.state)
 
 
 # ==============================================================================
-# 4. JSON Persistence & Dynamic Prompt Lookup (`PHASE_PROMPTS`)
+# 4. Dynamic Prompt Lookup (`PHASE_PROMPTS`) & Harness Factory
 # ==============================================================================
-
-
-def persist_interview_to_json(state: Any, summary_text: str) -> Path:
-    """Save the completed interview transcript and summary to `data/interviews_output.json`."""
-    settings = load_settings()
-    data_dir = Path(settings.mcp_server_url) if False else (_REPO_ROOT / "data")
-    data_dir.mkdir(parents=True, exist_ok=True)
-    output_file = data_dir / "interviews_output.json"
-
-    existing: list[dict[str, Any]] = []
-    if output_file.exists():
-        try:
-            loaded = json.loads(output_file.read_text(encoding="utf-8"))
-            if isinstance(loaded, list):
-                existing = loaded
-        except Exception:
-            existing = []
-
-    record = {
-        "interview_id": state.get("interview_id") or str(uuid.uuid4()),
-        "user_id": state.get("user_id") or "participant",
-        "user_name": state.get("user_name") or "Participant",
-        "topic": state.get("topic") or "",
-        "completed_at": utc_now_iso(),
-        "transcript": list(state.get("transcript") or []),
-        "summary": summary_text.strip(),
-    }
-
-    existing = [item for item in existing if item.get("interview_id") != record["interview_id"]]
-    existing.append(record)
-    output_file.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
-    state["saved_to_disk"] = True
-    state["saved_path"] = str(output_file)
-    return output_file
 
 
 def _build_prompt_variables(state: Any) -> dict[str, Any]:
@@ -489,11 +512,6 @@ def _build_prompt_variables(state: Any) -> dict[str, Any]:
     main_queue: list[str] = state.get("question_queue") or []
     followup_queue: list[dict[str, str]] = state.get("followup_queue") or []
     override = state.get("num_questions_override") or load_settings().num_questions_override
-
-    transcript_lines = [
-        f"- [{i}] ({t.get('source', 'main')}) Q: {t['question']} -> A: {t['answer']}"
-        for i, t in enumerate(transcript, start=1)
-    ] or ["(No answers recorded yet.)"]
 
     return {
         "user_name": state.get("user_name") or "(unknown)",
@@ -506,7 +524,6 @@ def _build_prompt_variables(state: Any) -> dict[str, Any]:
         "last_user_answer": state.get("last_user_answer") or "(None)",
         "remaining_main_count": len(main_queue),
         "remaining_followup_count": len(followup_queue),
-        "transcript_text": "\n  ".join(transcript_lines),
         "answered_count": len(transcript),
     }
 
@@ -537,6 +554,8 @@ def build_interview_harness(
         user_text = _extract_current_user_text(callback_context)
         if phase in {Phase.MAIN_QUEUE, Phase.FOLLOWUP_QUEUE} and user_text:
             advance_queues_on_user_answer(state, user_text)
+        elif phase == Phase.DONE and user_text.strip().lower() in RESTART_COMMANDS:
+            _handle_restart(state)
 
     async def _filter_tools_by_phase_callback(
         callback_context: Any, llm_request: Any
@@ -558,32 +577,14 @@ def build_interview_harness(
                     d for d in decls if getattr(d, "name", None) in allowed
                 ]
 
-    async def _after_agent_persist_callback(callback_context: Any) -> None:
-        state = callback_context.state
-        if state.get("phase") == str(Phase.DONE) and not state.get("saved_to_disk") and state.get("transcript"):
-            session = getattr(callback_context, "session", None)
-            summary_text = ""
-            for ev in reversed(getattr(session, "events", None) or []):
-                if getattr(ev, "author", None) == name and getattr(ev, "content", None):
-                    texts = [
-                        p.text
-                        for p in (ev.content.parts or [])
-                        if getattr(p, "text", None) and not getattr(p, "thought", False)
-                    ]
-                    if texts:
-                        summary_text = "\n".join(texts).strip()
-                        break
-            persist_interview_to_json(state, summary_text)
-
     return LlmAgent(
         name=name,
         description="Conducts a two-queue qualitative research interview (`question_queue` + `followup_queue`).",
         model=build_llm(model_name),
         instruction=build_harness_instruction,
-        tools=[start_interview, push_followup, end_interview],
+        tools=[start_interview, push_followup],
         before_agent_callback=_before_agent_queue_step,
         before_model_callback=_filter_tools_by_phase_callback,
-        after_agent_callback=_after_agent_persist_callback,
         retry_config=RetryConfig(max_attempts=3, initial_delay=0.2, backoff_factor=1.5, jitter=0.0),
     )
 

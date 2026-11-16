@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import pytest
 from google.genai import types
 
 from interviewer_app.orchestrator import (
@@ -49,8 +52,11 @@ def test_intake_blocks_hallucinated_name_or_topic() -> None:
     assert ctx.state["phase"] == str(Phase.INTAKE)
 
 
-def test_two_queues_main_then_followup_then_done() -> None:
-    """Drains `question_queue` via `.pop(0)`, pushes to `followup_queue`, drains `followup_queue`, and stops."""
+def test_two_queues_main_then_followup_then_programmatic_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drains `question_queue` via `.pop(0)`, pushes to `followup_queue`, drains `followup_queue`, and auto-saves JSON."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
     ctx = FakeToolContext(
         state={"phase": str(Phase.INTAKE)},
         user_text="Hi, I am Victor and I want to talk about AI in the workplace",
@@ -72,6 +78,7 @@ def test_two_queues_main_then_followup_then_done() -> None:
     assert ctx.state["current_question"] == "How does AI fit into your daily workflow?"
     assert len(ctx.state["question_queue"]) == 2
     assert ctx.state["followup_queue"] == []
+    assert ctx.state["saved_to_disk"] is False
 
     # 2. User answers Q1 -> `advance_queues_on_user_answer` pops Q2 from `question_queue`.
     phase = advance_queues_on_user_answer(
@@ -111,8 +118,8 @@ def test_two_queues_main_then_followup_then_done() -> None:
     assert ctx.state["current_followup_context"] == "using AI to automate unit tests"
     assert ctx.state["followup_queue"] == []
 
-    # Verify that in `FOLLOWUP_QUEUE`, `push_followup` is blocked so it can never loop.
-    assert "push_followup" not in ALLOWED_TOOLS_BY_PHASE[Phase.FOLLOWUP_QUEUE]
+    # Verify that in `FOLLOWUP_QUEUE`, no tools are exposed so it can never loop.
+    assert ALLOWED_TOOLS_BY_PHASE[Phase.FOLLOWUP_QUEUE] == set()
     blocked = push_followup(
         follow_up_question="Another follow-up?",
         referenced_answer="edge cases",
@@ -120,7 +127,7 @@ def test_two_queues_main_then_followup_then_done() -> None:
     )
     assert blocked["status"] == "ignored"
 
-    # 5. User answers the follow-up -> both queues are empty -> transitions to `DONE`.
+    # 5. User answers the follow-up -> both queues are empty -> programmatically transitions to `DONE` and saves JSON!
     phase = advance_queues_on_user_answer(
         ctx.state,
         "We run mutation testing and require a human review on every assertion.",
@@ -128,22 +135,33 @@ def test_two_queues_main_then_followup_then_done() -> None:
     assert phase == Phase.DONE
     assert ctx.state["current_question"] is None
     assert len(ctx.state["transcript"]) == 4
+    assert ctx.state["saved_to_disk"] is True
 
-    # 6. `end_interview(action='restart')` resets back to `intake`.
+    saved_file = Path(ctx.state["saved_path"])
+    assert saved_file.exists()
+    records = json.loads(saved_file.read_text(encoding="utf-8"))
+    assert len(records) == 1
+    assert records[0]["status"] == "pending_analysis"
+    assert "summary" not in records[0]
+
+    # 6. Typing `restart` resets back to `intake`.
     restarted = end_interview(action="restart", tool_context=ctx)  # type: ignore[arg-type]
     assert restarted["status"] == "restarted"
     assert ctx.state["phase"] == str(Phase.INTAKE)
     assert ctx.state["transcript"] == []
 
 
-def test_num_questions_override_and_phase_prompts() -> None:
+def test_num_questions_override_and_phase_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`num_questions_override=2` caps `question_queue` at 2 questions and formats all 4 `PHASE_PROMPTS`."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
     agent = build_interview_harness(num_questions=2)
     assert agent.name == "interview_orchestrator"
     assert ALLOWED_TOOLS_BY_PHASE[Phase.INTAKE] == {"start_interview"}
-    assert ALLOWED_TOOLS_BY_PHASE[Phase.MAIN_QUEUE] == {"push_followup", "end_interview"}
-    assert ALLOWED_TOOLS_BY_PHASE[Phase.FOLLOWUP_QUEUE] == {"end_interview"}
-    assert ALLOWED_TOOLS_BY_PHASE[Phase.DONE] == {"end_interview"}
+    assert ALLOWED_TOOLS_BY_PHASE[Phase.MAIN_QUEUE] == {"push_followup"}
+    assert ALLOWED_TOOLS_BY_PHASE[Phase.FOLLOWUP_QUEUE] == set()
+    assert ALLOWED_TOOLS_BY_PHASE[Phase.DONE] == set()
 
     ctx = FakeToolContext(
         state={"phase": str(Phase.INTAKE), "num_questions_override": 2},
@@ -171,7 +189,10 @@ def test_num_questions_override_and_phase_prompts() -> None:
     assert ctx.state["phase"] == str(Phase.FOLLOWUP_QUEUE)
     assert "Phase:** `followup_queue`" in build_harness_instruction(ctx)  # type: ignore[arg-type]
 
-    # Answering the follow-up drains `followup_queue` and transitions to `done`.
+    # Answering the follow-up drains `followup_queue`, transitions to `done`, and saves automatically.
     advance_queues_on_user_answer(ctx.state, "Specifically I use it for summarizing daily emails.")
     assert ctx.state["phase"] == str(Phase.DONE)
-    assert "Current State: `done`" in build_harness_instruction(ctx)  # type: ignore[arg-type]
+    assert ctx.state["saved_to_disk"] is True
+    done_prompt = build_harness_instruction(ctx)  # type: ignore[arg-type]
+    assert "Current State: `done`" in done_prompt
+    assert "do NOT generate a summary in chat" in done_prompt
