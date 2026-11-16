@@ -24,7 +24,7 @@ from .config import AnalysisSettings
 
 logger = logging.getLogger("analysis_app.neo4j")
 
-CONSTRAINTS_CYPHER = [
+CONSTRAINTS_CYPHER = (
     "CREATE CONSTRAINT user_id IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
     "CREATE CONSTRAINT interview_id IF NOT EXISTS FOR (i:Interview) REQUIRE i.id IS UNIQUE",
     "CREATE CONSTRAINT topic_name IF NOT EXISTS FOR (t:Topic) REQUIRE t.name IS UNIQUE",
@@ -35,7 +35,7 @@ CONSTRAINTS_CYPHER = [
     "CREATE CONSTRAINT keyword_phrase IF NOT EXISTS FOR (k:Keyword) REQUIRE k.phrase IS UNIQUE",
     "CREATE CONSTRAINT pain_point_text IF NOT EXISTS FOR (p:PainPoint) REQUIRE p.text IS UNIQUE",
     "CREATE CONSTRAINT recommendation_text IF NOT EXISTS FOR (r:Recommendation) REQUIRE r.text IS UNIQUE",
-]
+)
 
 UPSERT_INTERVIEW_CYPHER = """
 MERGE (u:User {id: $user_id})
@@ -58,32 +58,37 @@ MERGE (u)-[:PARTICIPATED_IN]->(i)
 MERGE (i)-[:EXPLORES_TOPIC]->(t)
 MERGE (u)-[:DISCUSSED_TOPIC]->(t)
 
-MERGE (s:Sentiment {label: $sentiment_label})
-MERGE (i)-[hs:HAS_OVERALL_SENTIMENT]->(s)
-SET hs.score = $sentiment_score
+FOREACH (_ IN CASE WHEN $sentiment_label IS NOT NULL AND $sentiment_label <> '' THEN [1] ELSE [] END |
+  MERGE (s:Sentiment {label: $sentiment_label})
+  MERGE (i)-[hs:HAS_OVERALL_SENTIMENT]->(s)
+  SET hs.score = $sentiment_score
+)
 
-MERGE (em:Emotion {name: $dominant_emotion})
-MERGE (i)-[fe:EXPRESSES_EMOTION]->(em)
-SET fe.tone = $communication_tone,
-    fe.confidence = $confidence_level
+FOREACH (_ IN CASE WHEN $dominant_emotion IS NOT NULL AND $dominant_emotion <> '' THEN [1] ELSE [] END |
+  MERGE (em:Emotion {name: $dominant_emotion})
+  MERGE (i)-[fe:EXPRESSES_EMOTION]->(em)
+  SET fe.tone = $communication_tone,
+      fe.confidence = $confidence_level
+)
 
 WITH i, t
-UNWIND $themes AS theme_name
+FOREACH (theme_name IN $themes |
   MERGE (th:Theme {name: theme_name})
   MERGE (i)-[:HIGHLIGHTS_THEME]->(th)
   MERGE (th)-[:RELATES_TO_TOPIC]->(t)
+)
 
-WITH DISTINCT i
-UNWIND $pain_points AS pain_text
+FOREACH (pain_text IN $pain_points |
   MERGE (pp:PainPoint {text: pain_text})
   MERGE (i)-[:REVEALS_PAIN_POINT]->(pp)
+)
 
-WITH DISTINCT i
-UNWIND $recommendations AS rec_text
+FOREACH (rec_text IN $recommendations |
   MERGE (rec:Recommendation {text: rec_text})
   MERGE (i)-[:SUGGESTS_RECOMMENDATION]->(rec)
+)
 
-WITH DISTINCT i
+WITH i
 UNWIND $answers AS ans
   MERGE (a:Answer {id: ans.answer_id})
   SET a.index           = ans.index,
@@ -108,54 +113,48 @@ UNWIND $answers AS ans
 
 
 def build_neo4j_parameters(record: dict[str, Any]) -> dict[str, Any]:
-    """Build the parameter dict passed to `UPSERT_INTERVIEW_CYPHER` from an analyzed record."""
-    interview_id = str(record.get("interview_id") or record.get("user_id") or "unknown")
+    """Build the parameter dict passed to `UPSERT_INTERVIEW_CYPHER` directly from the raw analyzed record."""
+    interview_id = record.get("interview_id") or record.get("user_id")
     report = record.get("analysis_report") or {}
-    session_sentiment = report.get("session_sentiment") or {"label": "neutral", "score": 1.0}
+    session_sentiment = report.get("session_sentiment") or {}
     summary = report.get("summary") or {}
     insights = report.get("emotion_and_insights") or {}
 
     answers_payload: list[dict[str, Any]] = []
     for idx, turn in enumerate(record.get("transcript") or [], start=1):
-        turn_analysis = turn.get("analysis")
-        sent = (turn_analysis or {}).get("sentiment") or {}
-        kws = (turn_analysis or {}).get("keywords") or []
+        turn_analysis = turn.get("analysis") or {}
+        sent = turn_analysis.get("sentiment") or {}
+        kws = turn_analysis.get("keywords") or []
         answers_payload.append(
             {
-                "answer_id": f"{interview_id}:{idx}",
+                "answer_id": turn_analysis.get("answer_id") or f"{interview_id}:{idx}",
                 "index": idx,
-                "source": str(turn.get("source") or "main_queue"),
-                "question": str(turn.get("question") or ""),
-                "answer": str(turn.get("answer") or ""),
-                "answered_at": str(turn.get("answered_at") or ""),
+                "source": turn.get("source"),
+                "question": turn.get("question"),
+                "answer": turn.get("answer"),
+                "answered_at": turn.get("answered_at"),
                 "sentiment_label": sent.get("label"),
                 "sentiment_score": sent.get("score"),
-                "keywords": [
-                    {"phrase": str(k.get("phrase", "")).lower(), "score": float(k.get("score", 0.0))}
-                    for k in kws
-                    if k.get("phrase")
-                ],
+                "keywords": [k for k in kws if isinstance(k, dict) and k.get("phrase")],
             }
         )
 
     return {
         "interview_id": interview_id,
-        "user_id": str(record.get("user_id") or "participant"),
-        "user_name": str(record.get("user_name") or record.get("user_id") or "Participant"),
-        "topic": str(record.get("topic") or "General"),
-        "completed_at": str(record.get("completed_at") or ""),
-        "analyzed_at": str(report.get("analyzed_at") or ""),
-        "overview": str(summary.get("overview") or ""),
-        "sentiment_label": str(session_sentiment.get("label") or "neutral"),
-        "sentiment_score": float(session_sentiment.get("score") or 0.0),
-        "dominant_emotion": str(insights.get("dominant_emotion") or "neutral"),
-        "communication_tone": str(insights.get("communication_tone") or "neutral"),
-        "confidence_level": str(insights.get("confidence_level") or "medium"),
-        "themes": [str(t) for t in (summary.get("themes") or ["General"])],
-        "pain_points": [str(p) for p in (insights.get("pain_points") or ["None noted"])],
-        "recommendations": [
-            str(r) for r in (insights.get("actionable_recommendations") or ["None noted"])
-        ],
+        "user_id": record.get("user_id"),
+        "user_name": record.get("user_name") or record.get("user_id"),
+        "topic": record.get("topic"),
+        "completed_at": record.get("completed_at"),
+        "analyzed_at": report.get("analyzed_at"),
+        "overview": summary.get("overview"),
+        "sentiment_label": session_sentiment.get("label"),
+        "sentiment_score": session_sentiment.get("score"),
+        "dominant_emotion": insights.get("dominant_emotion"),
+        "communication_tone": insights.get("communication_tone"),
+        "confidence_level": insights.get("confidence_level"),
+        "themes": [str(t) for t in (summary.get("themes") or []) if t],
+        "pain_points": [str(p) for p in (insights.get("pain_points") or []) if p],
+        "recommendations": [str(r) for r in (insights.get("actionable_recommendations") or []) if r],
         "answers": answers_payload,
     }
 
@@ -172,7 +171,7 @@ class Neo4jGraphStore:
         """Write `record` to Neo4j and return `{status, cypher_query, message?}`."""
         interview_id = str(record.get("interview_id") or "")
         cypher_preview = (
-            f'MATCH p = (u:User)-[:PARTICIPATED_IN]->(i:Interview {{id: "{interview_id}\"}})-[*1..2]->() '
+            f'MATCH p = (u:User)-[:PARTICIPATED_IN]->(i:Interview {{id: "{interview_id}"}})-[*1..2]->() '
             "RETURN p"
         )
         if not self.uri:
@@ -186,7 +185,7 @@ class Neo4jGraphStore:
         params = build_neo4j_parameters(record)
         total_keywords = sum(len(a["keywords"]) for a in params["answers"])
         logger.info(
-            "  [Neo4j] Preparing graph payload for '%s' -> User(:%s), Topic(%r), Sentiment(%s=%.3f), Emotion(%r), Themes=%s, PainPoints=%d, Recommendations=%d, Answers=%d, Keywords=%d",
+            "  [Neo4j] Preparing graph payload for '%s' -> User(:%s), Topic(%r), Sentiment(%s=%s), Emotion(%r), Themes=%s, PainPoints=%d, Recommendations=%d, Answers=%d, Keywords=%d",
             self.uri,
             params["user_id"],
             params["topic"],

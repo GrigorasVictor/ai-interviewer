@@ -17,6 +17,8 @@ from contracts import (
     apply_start_interview_to_state,
     reset_interview_state,
 )
+from google.adk.models.lite_llm import _get_completion_inputs
+from google.adk.models.llm_request import LlmRequest
 from google.adk.tools.mcp_tool import McpToolset
 from google.genai import types
 
@@ -207,3 +209,44 @@ def test_mcp_toolset_http_and_phase_prompts(
     done_prompt = build_harness_instruction(ctx)  # type: ignore[arg-type]
     assert "Current State: `done`" in done_prompt
     assert "do NOT generate a summary in chat" in done_prompt
+
+
+@pytest.mark.asyncio
+async def test_filter_tools_removes_empty_tool_objects_for_openrouter() -> None:
+    """Regression test: when all tools are filtered out (e.g. Q1 turn or `followup_queue`),
+    `config.tools` must NOT keep `Tool(function_declarations=[])` which ADK `lite_llm.py`
+    would serialize as `{"functionDeclarations": []}` (missing `"type": "function"` -> OpenRouter 400).
+    """
+    agent = build_interview_harness()
+    filter_cb = agent.before_model_callback
+    assert callable(filter_cb)
+
+    req = LlmRequest(
+        model="openrouter/nvidia/nemotron-3.5-lightning:free",
+        contents=[types.Content(role="user", parts=[types.Part.from_text(text="hi")])],
+        config=types.GenerateContentConfig(
+            tools=[
+                types.Tool(
+                    function_declarations=[
+                        types.FunctionDeclaration(name="start_interview", description="start"),
+                        types.FunctionDeclaration(name="push_followup", description="push"),
+                    ]
+                )
+            ]
+        ),
+    )
+    req.tools_dict = {"start_interview": object(), "push_followup": object()}  # type: ignore[dict-item]
+
+    # Turn 1 after `start_interview`: phase is `main_queue`, `last_user_answer` is None -> 0 allowed tools!
+    ctx = FakeReadonlyContext(state={"phase": str(Phase.MAIN_QUEUE), "last_user_answer": None})
+    await filter_cb(ctx, req)  # type: ignore[arg-type]
+
+    assert req.config.tools == []
+    # `tools_dict` remains intact so ADK never raises "Tool not found" if the LLM hallucinates a call.
+    assert "push_followup" in req.tools_dict
+
+    _, tools_payload, _, _, _ = await _get_completion_inputs(
+        req,
+        "openrouter/nvidia/nemotron-3.5-lightning:free",
+    )
+    assert tools_payload is None

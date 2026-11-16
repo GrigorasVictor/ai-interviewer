@@ -15,13 +15,13 @@ import json
 import os
 import re
 import uuid
+from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from .common import utc_now_iso
+from .common import SKIPPED_ANSWER, utc_now_iso
 from .llm_outputs import IntakeResult
-from .record import SKIPPED_ANSWER
 
 MIN_QUESTIONS = 3
 MAX_QUESTIONS = 5
@@ -115,8 +115,12 @@ def transition_phase(state: Any, signal: Signal) -> Phase:
 
 
 def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return slug or "participant"
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "participant"
+
+
+def _normalize_question(raw_question: str) -> str:
+    cleaned = str(raw_question).strip()
+    return f"{cleaned.rstrip('?')}?" if cleaned else ""
 
 
 def parse_num_questions_env() -> int | None:
@@ -126,9 +130,7 @@ def parse_num_questions_env() -> int | None:
 
 def resolve_data_dir() -> Path:
     raw = os.getenv("DATA_DIR", "").strip()
-    if not raw:
-        return _REPO_ROOT / "data"
-    candidate = Path(raw)
+    candidate = Path(raw) if raw else (_REPO_ROOT / "data")
     return candidate if candidate.is_absolute() else (_REPO_ROOT / candidate)
 
 
@@ -143,8 +145,7 @@ def persist_interview_to_json(state: Any) -> Path:
     """Save the user's interview to `data/<user_id>.json` (works with `dict` or ADK `State`)."""
     uid = state.get("user_id") or slugify(state.get("user_name") or "participant")
     state["user_id"] = uid
-    if state.get("processed") is None:
-        state["processed"] = False
+    state["processed"] = bool(state.get("processed", False))
     path = user_json_path(uid)
     record = {key: state.get(key) for key in PERSISTED_KEYS}
     path.write_text(json.dumps(record, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
@@ -154,20 +155,22 @@ def persist_interview_to_json(state: Any) -> Path:
 def load_user_interview(user_id: str) -> dict[str, Any] | None:
     """Load `data/<user_id>.json` if it exists."""
     path = user_json_path(user_id)
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
 def finish_and_persist_if_needed(state: Any, signal: Signal) -> Phase:
     """Mark both queues empty, transition to `DONE`, set `status='pending_analysis'` & `processed=False`, and save."""
-    state["question_queue"] = []
-    state["followup_queue"] = []
-    state["current_question"] = None
-    state["current_followup_context"] = None
-    state["status"] = "pending_analysis"
-    state["processed"] = False
-    state["completed_at"] = utc_now_iso()
+    state.update(
+        {
+            "question_queue": [],
+            "followup_queue": [],
+            "current_question": None,
+            "current_followup_context": None,
+            "status": "pending_analysis",
+            "processed": False,
+            "completed_at": utc_now_iso(),
+        }
+    )
     next_phase = transition_phase(state, signal)
     if state.get("transcript"):
         persist_interview_to_json(state)
@@ -199,12 +202,15 @@ def stop_interview_state(state: Any) -> dict[str, Any]:
     return {"status": "stopped", "phase": state["phase"]}
 
 
-END_ACTIONS = {
-    "restart": reset_interview_state,
-    "new": reset_interview_state,
-    "reset": reset_interview_state,
-    "stop": stop_interview_state,
+USER_COMMAND_HANDLERS: dict[str, Callable[[Any], Phase]] = {
+    **{cmd: lambda state: finish_and_persist_if_needed(state, Signal.STOP) for cmd in STOP_COMMANDS},
+    **{cmd: lambda state: (reset_interview_state(state), Phase.INTAKE)[1] for cmd in RESTART_COMMANDS},
 }
+
+
+def _tokens_grounded_in_history(value: str | None, history_cf: str) -> bool:
+    tokens = [tok for tok in re.findall(r"[a-z0-9]+", (value or "").casefold()) if len(tok) >= 2]
+    return not history_cf or bool(tokens and any(tok in history_cf for tok in tokens))
 
 
 def apply_start_interview_to_state(
@@ -216,7 +222,7 @@ def apply_start_interview_to_state(
     user_history: str = "",
 ) -> dict[str, Any]:
     """Validate intake + initial questions, pop Q1, and save `data/<user_id>.json`."""
-    if not user_name.strip() and not topic.strip() and not (questions or []):
+    if not any((user_name.strip(), topic.strip(), questions)):
         transition_phase(state, Signal.NEED_MORE_INFO)
         return {
             "status": "missing_tool_arguments",
@@ -229,16 +235,13 @@ def apply_start_interview_to_state(
 
     intake = IntakeResult(user_name=user_name, topic=topic)
     history_cf = user_history.casefold()
-
-    name_tokens = [tok for tok in re.findall(r"[a-z0-9]+", (intake.user_name or "").casefold()) if len(tok) >= 2]
-    name_ok = not history_cf or bool(name_tokens and any(tok in history_cf for tok in name_tokens))
-    topic_words = [
-        w for w in re.findall(r"[a-z0-9]+", (intake.topic or "").casefold()) if len(w) >= 2
-    ]
-    topic_ok = not history_cf or bool(topic_words and any(w in history_cf for w in topic_words))
-    distinct_fields = (intake.user_name or "").casefold() != (intake.topic or "").casefold()
-
-    if not (intake.is_complete and name_ok and topic_ok and distinct_fields):
+    grounded = (
+        intake.is_complete
+        and _tokens_grounded_in_history(intake.user_name, history_cf)
+        and _tokens_grounded_in_history(intake.topic, history_cf)
+        and (intake.user_name or "").casefold() != (intake.topic or "").casefold()
+    )
+    if not grounded:
         transition_phase(state, Signal.NEED_MORE_INFO)
         return {
             "status": "wait_for_user",
@@ -248,16 +251,9 @@ def apply_start_interview_to_state(
 
     override = state.get("num_questions_override") or parse_num_questions_env()
     target_count = int(override) if override is not None else MIN_QUESTIONS
-
-    cleaned_questions: list[str] = []
-    for raw_q in questions or []:
-        q = str(raw_q).strip()
-        if q:
-            q = q if q.endswith("?") else f"{q}?"
-            if q not in cleaned_questions:
-                cleaned_questions.append(q)
-
+    cleaned_questions = list(dict.fromkeys(filter(None, (_normalize_question(q) for q in (questions or [])))))
     required_min = min(target_count, MIN_QUESTIONS)
+
     if len(cleaned_questions) < required_min:
         transition_phase(state, Signal.NEED_MORE_INFO)
         return {
@@ -277,7 +273,7 @@ def apply_start_interview_to_state(
         {
             "interview_id": str(uuid.uuid4()),
             "user_name": intake.user_name,
-            "user_id": slugify(intake.user_name),
+            "user_id": slugify(intake.user_name or "participant"),
             "topic": intake.topic,
             "status": "in_progress",
             "processed": False,
@@ -309,6 +305,33 @@ def apply_start_interview_to_state(
     }
 
 
+def _pop_main_queue(state: Any) -> Phase | None:
+    main_queue = list(state.get("question_queue") or [])
+    if not main_queue:
+        return None
+    state["current_question"] = main_queue.pop(0)
+    state["question_queue"] = main_queue
+    state["current_followup_context"] = None
+    return transition_phase(state, Signal.POP_MAIN)
+
+
+def _pop_followup_queue(state: Any) -> Phase | None:
+    followup_queue = list(state.get("followup_queue") or [])
+    if not followup_queue:
+        return None
+    next_item = followup_queue.pop(0)
+    state["followup_queue"] = followup_queue
+    state["current_question"] = next_item["question"]
+    state["current_followup_context"] = next_item["context"]
+    return transition_phase(state, Signal.POP_FOLLOWUP)
+
+
+QUEUE_POP_STRATEGIES: tuple[Callable[[Any], Phase | None], ...] = (
+    _pop_main_queue,
+    _pop_followup_queue,
+)
+
+
 def apply_push_followup_to_state(
     state: Any,
     *,
@@ -316,31 +339,40 @@ def apply_push_followup_to_state(
     referenced_answer: str = "",
 ) -> dict[str, Any]:
     """Append a follow-up question onto `followup_queue` and update `data/<user_id>.json`."""
-    if state.get("phase") != str(Phase.MAIN_QUEUE):
-        return {"status": "ignored", "reason": "Only allowed in `main_queue`."}
-
-    if not follow_up_question.strip():
-        return {"status": "ignored", "reason": "Empty follow_up_question."}
-
+    normalized_q = _normalize_question(follow_up_question)
     followup_queue = list(state.get("followup_queue") or [])
-    if state.get("pushed_this_turn") or len(followup_queue) >= MAX_FOLLOWUPS:
-        return {"status": "queue_full_or_already_pushed"}
 
-    q = follow_up_question.strip()
-    if not q.endswith("?"):
-        q = f"{q}?"
+    guard_Failure = next(
+        (
+            resp
+            for cond, resp in (
+                (
+                    state.get("phase") != str(Phase.MAIN_QUEUE),
+                    {"status": "ignored", "reason": "Only allowed in `main_queue`."},
+                ),
+                (
+                    not normalized_q,
+                    {"status": "ignored", "reason": "Empty follow_up_question."},
+                ),
+                (
+                    bool(state.get("pushed_this_turn")) or len(followup_queue) >= MAX_FOLLOWUPS,
+                    {"status": "queue_full_or_already_pushed"},
+                ),
+            )
+            if cond
+        ),
+        None,
+    )
+    if guard_Failure is not None:
+        return guard_Failure
+
     ctx_summary = referenced_answer.strip() or (state.get("last_user_answer") or "your earlier point")
-
-    followup_queue.append({"question": q, "context": ctx_summary})
+    followup_queue.append({"question": normalized_q, "context": ctx_summary})
     state["followup_queue"] = followup_queue
     state["pushed_this_turn"] = True
 
     if not state.get("current_question"):
-        next_item = followup_queue.pop(0)
-        state["followup_queue"] = followup_queue
-        state["current_question"] = next_item["question"]
-        state["current_followup_context"] = next_item["context"]
-        transition_phase(state, Signal.POP_FOLLOWUP)
+        _pop_followup_queue(state)
 
     persist_interview_to_json(state)
     return {
@@ -350,73 +382,63 @@ def apply_push_followup_to_state(
     }
 
 
+def _record_turn_and_auto_followup(state: Any, cleaned: str, lower: str) -> None:
+    current_q = state.get("current_question")
+    if not current_q:
+        return
+
+    current_phase = Phase(state.get("phase", Phase.INTAKE))
+    is_skip = lower in SKIP_COMMANDS
+    recorded_answer = SKIPPED_ANSWER if is_skip else cleaned
+
+    transcript = list(state.get("transcript") or [])
+    transcript.append(
+        {
+            "source": str(current_phase),
+            "question": current_q,
+            "context": state.get("current_followup_context"),
+            "answer": recorded_answer,
+            "answered_at": utc_now_iso(),
+        }
+    )
+    state["transcript"] = transcript
+    state["last_answered_question"] = current_q
+    state["last_user_answer"] = recorded_answer
+
+    followup_q_list = list(state.get("followup_queue") or [])
+    needs_elaboration = (
+        current_phase == Phase.MAIN_QUEUE
+        and not is_skip
+        and 0 < len(cleaned.split()) < MIN_ANSWER_WORDS
+        and len(followup_q_list) < MAX_FOLLOWUPS
+    )
+    if needs_elaboration:
+        followup_q_list.append(
+            {
+                "question": f"Could you elaborate a bit more on your answer regarding: {current_q}",
+                "context": f"your brief answer '{cleaned}' to '{current_q}'",
+            }
+        )
+        state["followup_queue"] = followup_q_list
+
+
 def advance_queues_on_user_answer(state: Any, user_text: str) -> Phase:
     """Record the user's answer, `.pop(0)` from `question_queue` then `followup_queue`, and update `data/<user_id>.json`."""
     cleaned = user_text.strip()
     lower = cleaned.lower()
 
-    if lower in STOP_COMMANDS:
-        return finish_and_persist_if_needed(state, Signal.STOP)
+    command_handler = USER_COMMAND_HANDLERS.get(lower)
+    if command_handler is not None:
+        return command_handler(state)
 
-    if lower in RESTART_COMMANDS:
-        reset_interview_state(state)
-        return Phase.INTAKE
-
-    current_q = state.get("current_question")
-    current_phase = Phase(state.get("phase", Phase.INTAKE))
-
-    if current_q:
-        is_skip = lower in SKIP_COMMANDS
-        recorded_answer = SKIPPED_ANSWER if is_skip else cleaned
-        transcript = list(state.get("transcript") or [])
-        transcript.append(
-            {
-                "source": str(current_phase),
-                "question": current_q,
-                "context": state.get("current_followup_context"),
-                "answer": recorded_answer,
-                "answered_at": utc_now_iso(),
-            }
-        )
-        state["transcript"] = transcript
-        state["last_answered_question"] = current_q
-        state["last_user_answer"] = recorded_answer
-
-        followup_q_list = list(state.get("followup_queue") or [])
-        if (
-            current_phase == Phase.MAIN_QUEUE
-            and not is_skip
-            and 0 < len(cleaned.split()) < MIN_ANSWER_WORDS
-            and len(followup_q_list) < MAX_FOLLOWUPS
-        ):
-            followup_q_list.append(
-                {
-                    "question": f"Could you elaborate a bit more on your answer regarding: {current_q}",
-                    "context": f"your brief answer '{cleaned}' to '{current_q}'",
-                }
-            )
-            state["followup_queue"] = followup_q_list
-
-    main_queue = list(state.get("question_queue") or [])
-    followup_queue = list(state.get("followup_queue") or [])
+    _record_turn_and_auto_followup(state, cleaned, lower)
     state["pushed_this_turn"] = False
 
-    if main_queue:
-        state["current_question"] = main_queue.pop(0)
-        state["question_queue"] = main_queue
-        state["current_followup_context"] = None
-        phase = transition_phase(state, Signal.POP_MAIN)
-        persist_interview_to_json(state)
-        return phase
-
-    if followup_queue:
-        next_item = followup_queue.pop(0)
-        state["followup_queue"] = followup_queue
-        state["current_question"] = next_item["question"]
-        state["current_followup_context"] = next_item["context"]
-        phase = transition_phase(state, Signal.POP_FOLLOWUP)
-        persist_interview_to_json(state)
-        return phase
+    for pop_strategy in QUEUE_POP_STRATEGIES:
+        next_phase = pop_strategy(state)
+        if next_phase is not None:
+            persist_interview_to_json(state)
+            return next_phase
 
     return finish_and_persist_if_needed(state, Signal.QUEUES_EMPTY)
 

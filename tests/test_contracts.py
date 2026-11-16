@@ -7,40 +7,48 @@ from pydantic import ValidationError
 
 from contracts import (
     SKIPPED_ANSWER,
+    AnswerAnalysis,
+    EmotionToneAnalysis,
     IntakeResult,
+    InterviewSummary,
     Keyword,
-    Rubric,
-    RubricArea,
     Sentiment,
-    TranscriptTurn,
 )
 
 
-def test_intake_result_completeness() -> None:
+def test_intake_result_completeness_and_placeholder_stripping() -> None:
     assert not IntakeResult(user_name="Ana", topic=None).is_complete
+    assert not IntakeResult(user_name="unknown", topic="AI in the workplace").is_complete
     assert not IntakeResult(user_name=None, topic="AI in the workplace").is_complete
     assert IntakeResult(user_name="Ana", topic="AI in the workplace").is_complete
 
 
-def test_rubric_requires_3_to_5_unique_areas() -> None:
-    areas = [
-        RubricArea(name="Task Automation", description="Desc 1", angles=["a1"]),
-        RubricArea(name="Trust & Safety", description="Desc 2", angles=["a2"]),
-        RubricArea(name="Skill Evolution", description="Desc 3", angles=["a3"]),
-    ]
-    rubric = Rubric(topic="AI in the workplace", areas=areas)
-    assert rubric.area_names() == ["Task Automation", "Trust & Safety", "Skill Evolution"]
+def test_summary_and_emotion_contracts_validation() -> None:
+    summary = InterviewSummary(
+        overview="Ana shared a pragmatic perspective on AI in daily workflows.",
+        themes=["Workflow Automation", "Human Verification"],
+        key_points=["Automates boilerplate tests", "Requires code review"],
+        quotes=["I use AI every morning"],
+        sentiment_explanation="Predominantly positive sentiment.",
+    )
+    assert len(summary.themes) == 2
 
-    # Duplicate area names (case-insensitive) must be rejected.
     with pytest.raises(ValidationError):
-        Rubric(
-            topic="AI in the workplace",
-            areas=[
-                RubricArea(name="Task Automation", description="Desc 1", angles=["a1"]),
-                RubricArea(name="task automation", description="Desc 2", angles=["a2"]),
-                RubricArea(name="Skill Evolution", description="Desc 3", angles=["a3"]),
-            ],
+        InterviewSummary(
+            overview="Too few themes",
+            themes=["OnlyOne"],
+            key_points=["p1", "p2"],
+            sentiment_explanation="exp",
         )
+
+    insights = EmotionToneAnalysis(
+        dominant_emotion="optimism",
+        communication_tone="analytical and concise",
+        confidence_level="high",
+        pain_points=["Edge case debugging"],
+        actionable_recommendations=["Adopt automated test review"],
+    )
+    assert insights.dominant_emotion == "optimism"
 
 
 def test_score_rounds_to_three_decimals_and_keyword_lowercases() -> None:
@@ -51,15 +59,6 @@ def test_score_rounds_to_three_decimals_and_keyword_lowercases() -> None:
     assert kw.phrase == "drafting emails"
     assert kw.score == 0.612
 
-
-def test_transcript_turn_skip_detection() -> None:
-    turn = TranscriptTurn(
-        index=1,
-        answer_id=TranscriptTurn.make_answer_id("int-1", 1),
-        area="Task Automation",
-        question="How do you use AI?",
-        answer=SKIPPED_ANSWER,
-        asked_at="2026-11-16T10:00:00Z",
-    )
-    assert turn.is_skipped
-    assert turn.answer_id == "int-1:1"
+    analysis = AnswerAnalysis(answer_id="int-1:1", sentiment=s, keywords=[kw])
+    assert analysis.answer_id == "int-1:1"
+    assert SKIPPED_ANSWER == "[skipped]"

@@ -38,8 +38,8 @@ class AnalysisSettings:
 
 
 def load_analysis_settings() -> AnalysisSettings:
-    llm_default = os.getenv("LLM_MODEL", "ollama_chat/qwen3:1.7b").strip()
-    summary_model = os.getenv("LLM_MODEL_SUMMARY", "").strip() or llm_default
+    analysis_default = os.getenv("ANALYSIS_LLM_MODEL", "ollama_chat/mimo-v2.6:9b").strip()
+    summary_model = os.getenv("LLM_MODEL_SUMMARY", "").strip() or analysis_default
     insights_model = os.getenv("LLM_MODEL_INSIGHTS", "").strip() or "ollama_chat/qwen3:1.7b"
     return AnalysisSettings(
         data_dir=_resolve_data_dir(),

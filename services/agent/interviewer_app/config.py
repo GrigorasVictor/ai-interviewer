@@ -44,7 +44,6 @@ class AgentSettings:
     """Typed snapshot of the environment variables used by the agent service."""
 
     llm_model: str
-    llm_model_summary: str
     ollama_api_base: str
     llm_thinking: bool
     num_questions_override: int | None
@@ -55,11 +54,8 @@ class AgentSettings:
 
 def load_settings() -> AgentSettings:
     """Read settings from environment variables with sensible local defaults."""
-    llm_model = os.getenv("LLM_MODEL", "ollama_chat/qwen3:1.7b").strip()
-    summary_model = os.getenv("LLM_MODEL_SUMMARY", "").strip() or llm_model
     return AgentSettings(
-        llm_model=llm_model,
-        llm_model_summary=summary_model,
+        llm_model=os.getenv("LLM_MODEL", "ollama_chat/qwen3:1.7b").strip(),
         ollama_api_base=os.getenv("OLLAMA_API_BASE", "http://localhost:11434").strip(),
         llm_thinking=_parse_bool(os.getenv("LLM_THINKING", "true"), default=True),
         num_questions_override=_parse_optional_positive_int(

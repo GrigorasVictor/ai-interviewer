@@ -29,10 +29,9 @@ def main() -> None:
     )
     parser.add_argument("--watch", action="store_true", help="Continuously watch data/ for completed interviews.")
     parser.add_argument("--force", action="store_true", help="Re-analyze files even if processed=True.")
-    parser.add_argument("--no-llm", action="store_true", help="Use deterministic fallback instead of calling LLM.")
     args = parser.parse_args()
 
-    pipeline = AnalysisPipeline(use_llm=not args.no_llm)
+    pipeline = AnalysisPipeline()
     if not args.watch:
         summary = pipeline.process_directory(force=args.force)
         print(json.dumps(summary, indent=2))

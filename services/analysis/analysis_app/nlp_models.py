@@ -1,9 +1,4 @@
-"""NLP analyzers for per-answer sentiment, session sentiment, and keyphrase extraction.
-
-Uses Hugging Face `transformers` / `KeyBERT` when installed, and automatically falls back
-to NLTK `VADER` (`vader_lexicon`) + TF-scored n-gram keyphrases + Ollama embeddings so the
-pipeline works out-of-the-box offline or in lightweight environments.
-"""
+"""NLP analyzers for per-answer sentiment, session sentiment, and keyphrase extraction."""
 
 from __future__ import annotations
 
@@ -12,22 +7,48 @@ import re
 from collections import Counter
 from typing import Any
 
-from contracts import SKIPPED_ANSWER, Keyword, Sentiment
+import nltk
+from contracts import SKIPPED_ANSWER, Keyword, Sentiment, SentimentLabel
 
-_STOPWORDS = {
-    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
-    "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but",
-    "by", "can", "could", "did", "do", "does", "doing", "down", "during", "each", "everything",
-    "few", "for", "from", "further", "had", "has", "have", "having", "he", "her", "here", "hers",
-    "herself", "him", "himself", "his", "how", "i", "if", "in", "into", "is", "it", "its",
-    "itself", "just", "me", "more", "most", "Mostly", "mostly", "my", "myself", "no", "nor",
-    "not", "now", "of", "off", "on", "once", "only", "or", "other", "our", "ours", "ourselves",
-    "out", "over", "own", "same", "she", "should", "so", "some", "such", "than", "that", "the",
-    "their", "theirs", "them", "themselves", "then", "there", "these", "they", "this", "those",
-    "through", "to", "too", "twice", "u", "under", "until", "up", "very", "was", "we", "well",
-    "were", "what", "when", "where", "which", "while", "who", "whom", "why", "will", "with",
-    "would", "you", "your", "yours", "yourself", "yourselves",
+SIGN_BY_LABEL: dict[str, float] = {
+    "positive": 1.0,
+    "neutral": 0.0,
+    "negative": -1.0,
 }
+
+HF_LABEL_MAP: dict[str, SentimentLabel] = {
+    "label_0": "negative",
+    "label_1": "neutral",
+    "label_2": "positive",
+    "negative": "negative",
+    "neutral": "neutral",
+    "positive": "positive",
+}
+
+
+def _load_english_stopwords() -> set[str]:
+    try:
+        from nltk.corpus import stopwords
+
+        return set(stopwords.words("english"))
+    except LookupError:
+        nltk.download("stopwords", quiet=True)
+        from nltk.corpus import stopwords
+
+        return set(stopwords.words("english"))
+
+
+def _classify_signed_score(value: float, threshold: float, neutral_score: float) -> Sentiment:
+    """Table-driven classification of a signed polarity value in [-1, 1]."""
+    rules: tuple[tuple[bool, SentimentLabel, float], ...] = (
+        (value > threshold, "positive", abs(value)),
+        (value < -threshold, "negative", abs(value)),
+    )
+    label, score = next(
+        ((lbl, sc) for matched, lbl, sc in rules if matched),
+        ("neutral", neutral_score),
+    )
+    return Sentiment(label=label, score=round(min(1.0, max(0.0, score)), 3))
 
 
 class SentimentEngine:
@@ -36,15 +57,13 @@ class SentimentEngine:
     def __init__(self, preferred_model: str = "cardiffnlp/twitter-roberta-base-sentiment-latest") -> None:
         self.preferred_model = preferred_model
         self.model_name = "nltk/vader_lexicon"
-        self._hf_pipe: Any = None
-        self._vader: Any = None
-        self._init_models()
+        self._analyzer = self._build_analyzer()
 
-    def _init_models(self) -> None:
+    def _build_analyzer(self):
         try:
             from transformers import pipeline  # type: ignore[import-not-found]
 
-            self._hf_pipe = pipeline(
+            hf_pipe = pipeline(
                 "text-classification",
                 model=self.preferred_model,
                 truncation=True,
@@ -52,142 +71,106 @@ class SentimentEngine:
                 local_files_only=True,
             )
             self.model_name = self.preferred_model
-            return
+            return lambda text: self._score_hf(hf_pipe, text)
         except Exception:
-            self._hf_pipe = None
+            pass
+
+        from nltk.sentiment import SentimentIntensityAnalyzer
 
         try:
-            import nltk
-            from nltk.sentiment import SentimentIntensityAnalyzer
+            vader = SentimentIntensityAnalyzer()
+        except LookupError:
+            nltk.download("vader_lexicon", quiet=True)
+            vader = SentimentIntensityAnalyzer()
+        self.model_name = "nltk/vader_lexicon"
+        return lambda text: self._score_vader(vader, text)
 
-            try:
-                self._vader = SentimentIntensityAnalyzer()
-            except LookupError:
-                nltk.download("vader_lexicon", quiet=True)
-                self._vader = SentimentIntensityAnalyzer()
-            self.model_name = "nltk/vader_lexicon"
-        except Exception:
-            self._vader = None
-            self.model_name = "lexicon-fallback"
+    @staticmethod
+    def _score_hf(hf_pipe: Any, text: str) -> Sentiment:
+        raw = hf_pipe(text[:5000])[0]
+        label = HF_LABEL_MAP.get(str(raw["label"]).lower(), "neutral")
+        return Sentiment(label=label, score=round(float(raw["score"]), 3))
+
+    @staticmethod
+    def _score_vader(vader: Any, text: str) -> Sentiment:
+        scores = vader.polarity_scores(text)
+        compound = float(scores["compound"])
+        polarized_conf = min(1.0, 0.5 + abs(compound) / 2)
+        neutral_conf = max(float(scores["neu"]), 1.0 - abs(compound))
+        sentiment = _classify_signed_score(compound, threshold=0.149, neutral_score=neutral_conf)
+        return (
+            sentiment
+            if sentiment.label == "neutral"
+            else Sentiment(label=sentiment.label, score=round(polarized_conf, 3))
+        )
 
     def analyze_text(self, text: str) -> Sentiment:
         cleaned = (text or "").strip()
         if not cleaned or cleaned == SKIPPED_ANSWER:
             return Sentiment(label="neutral", score=1.0)
-
-        if self._hf_pipe is not None:
-            raw = self._hf_pipe(cleaned[:5000])[0]
-            lbl = str(raw["label"]).lower()
-            label_map = {
-                "label_0": "negative",
-                "label_1": "neutral",
-                "label_2": "positive",
-                "negative": "negative",
-                "neutral": "neutral",
-                "positive": "positive",
-            }
-            norm_label = label_map.get(lbl, "neutral")
-            return Sentiment(label=norm_label, score=round(float(raw["score"]), 3))  # type: ignore[arg-type]
-
-        if self._vader is not None:
-            scores = self._vader.polarity_scores(cleaned)
-            compound = float(scores["compound"])
-            if compound >= 0.15:
-                return Sentiment(label="positive", score=round(min(1.0, 0.5 + abs(compound) / 2), 3))
-            if compound <= -0.15:
-                return Sentiment(label="negative", score=round(min(1.0, 0.5 + abs(compound) / 2), 3))
-            return Sentiment(label="neutral", score=round(max(float(scores["neu"]), 1.0 - abs(compound)), 3))
-
-        return Sentiment(label="neutral", score=0.5)
+        return self._analyzer(cleaned)
 
     @staticmethod
     def aggregate_session_sentiment(sentiments: list[Sentiment]) -> Sentiment:
-        """Deterministic session sentiment aggregation (per `MCP_SERVICE.md` §3.1)."""
+        """Deterministic session sentiment aggregation."""
         if not sentiments:
             return Sentiment(label="neutral", score=1.0)
-
-        signed_values: list[float] = []
-        for s in sentiments:
-            sign = 1.0 if s.label == "positive" else (-1.0 if s.label == "negative" else 0.0)
-            signed_values.append(float(s.score) * sign)
-
+        signed_values = [float(s.score) * SIGN_BY_LABEL[s.label] for s in sentiments]
         mean_signed = sum(signed_values) / len(signed_values)
-        if mean_signed > 0.25:
-            return Sentiment(label="positive", score=round(abs(mean_signed), 3))
-        if mean_signed < -0.25:
-            return Sentiment(label="negative", score=round(abs(mean_signed), 3))
-        return Sentiment(label="neutral", score=round(1.0 - abs(mean_signed), 3))
+        return _classify_signed_score(mean_signed, threshold=0.25, neutral_score=1.0 - abs(mean_signed))
 
 
 class KeywordEngine:
-    """Extracts 3-5 lowercase keyphrases per answer (`Keyword(phrase, score)`)."""
+    """Extracts up to `top_n` lowercase keyphrases per answer (`Keyword(phrase, score)`)."""
 
     def __init__(self, preferred_model: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
         self.preferred_model = preferred_model
         self.model_name = "ngram-tf-keyphrase"
-        self._kw_model: Any = None
-        self._init_model()
+        self._stopwords = _load_english_stopwords()
+        self._extractor = self._build_extractor()
 
-    def _init_model(self) -> None:
+    def _build_extractor(self):
         try:
             from keybert import KeyBERT  # type: ignore[import-not-found]
 
-            self._kw_model = KeyBERT(model=self.preferred_model)
+            kw_model = KeyBERT(model=self.preferred_model)
             self.model_name = self.preferred_model
+            return lambda text, top_n: self._extract_keybert(kw_model, text, top_n)
         except Exception:
-            self._kw_model = None
+            return self._extract_ngrams
 
-    def extract(self, text: str, top_n: int = 5) -> list[Keyword]:
-        cleaned = (text or "").strip()
-        if not cleaned or cleaned == SKIPPED_ANSWER:
-            return []
+    def _extract_keybert(self, kw_model: Any, text: str, top_n: int) -> list[Keyword]:
+        raw_kws = kw_model.extract_keywords(
+            text,
+            keyphrase_ngram_range=(1, 2),
+            stop_words="english",
+            use_mmr=True,
+            diversity=0.5,
+            top_n=top_n,
+        )
+        return [
+            Keyword(phrase=phrase.lower().strip(), score=round(float(score), 3))
+            for phrase, score in raw_kws
+            if len(phrase.strip()) >= 3
+        ][:top_n]
 
-        words = [
-            w
-            for w in re.findall(r"[a-zA-Z0-9]+", cleaned.lower())
-            if len(w) >= 3 and w not in _STOPWORDS
-        ]
+    def _extract_ngrams(self, text: str, top_n: int) -> list[Keyword]:
+        tokens = re.findall(r"[a-zA-Z0-9]+", text.lower())
+        words = [w for w in tokens if len(w) >= 3 and w not in self._stopwords]
         if not words:
             return []
+        if len(text.split()) < 4:
+            return [Keyword(phrase=w, score=0.0) for w in list(dict.fromkeys(words))[:top_n]]
 
-        if len(cleaned.split()) < 4:
-            seen_short: list[str] = []
-            for w in words:
-                if w not in seen_short:
-                    seen_short.append(w)
-            return [Keyword(phrase=w, score=0.0) for w in seen_short[:top_n]]
-
-        if self._kw_model is not None:
-            try:
-                raw_kws = self._kw_model.extract_keywords(
-                    cleaned,
-                    keyphrase_ngram_range=(1, 2),
-                    stop_words="english",
-                    use_mmr=True,
-                    diversity=0.5,
-                    top_n=top_n,
-                )
-                return [
-                    Keyword(phrase=phrase.lower().strip(), score=round(float(score), 3))
-                    for phrase, score in raw_kws
-                    if len(phrase.strip()) >= 3
-                ][:top_n]
-            except Exception:
-                pass
-
-        # Deterministic n-gram keyphrase scoring (bigrams + unigrams)
-        candidates: list[str] = []
-        tokens = re.findall(r"[a-zA-Z0-9]+", cleaned.lower())
-        for i in range(len(tokens) - 1):
-            w1, w2 = tokens[i], tokens[i + 1]
-            if w1 not in _STOPWORDS and w2 not in _STOPWORDS and len(w1) >= 3 and len(w2) >= 3:
-                candidates.append(f"{w1} {w2}")
-        for w in words:
-            candidates.append(w)
-
-        counts = Counter(candidates)
+        bigrams = [
+            f"{w1} {w2}"
+            for w1, w2 in zip(tokens, tokens[1:])
+            if w1 not in self._stopwords and w2 not in self._stopwords and len(w1) >= 3 and len(w2) >= 3
+        ]
+        counts = Counter([*bigrams, *words])
         total = max(1, sum(counts.values()))
-        scored: list[tuple[str, float]] = []
+
+        scored: list[Keyword] = []
         used_words: set[str] = set()
         for phrase, freq in counts.most_common():
             phrase_tokens = set(phrase.split())
@@ -195,9 +178,14 @@ class KeywordEngine:
                 continue
             used_words |= phrase_tokens
             bonus = 1.25 if " " in phrase else 1.0
-            raw_score = min(0.95, round(math.sqrt(freq / total) * bonus, 3))
-            scored.append((phrase, raw_score))
+            score = min(0.95, round(math.sqrt(freq / total) * bonus, 3))
+            scored.append(Keyword(phrase=phrase, score=score))
             if len(scored) >= top_n:
                 break
+        return scored
 
-        return [Keyword(phrase=p, score=s) for p, s in scored]
+    def extract(self, text: str, top_n: int = 5) -> list[Keyword]:
+        cleaned = (text or "").strip()
+        if not cleaned or cleaned == SKIPPED_ANSWER:
+            return []
+        return self._extractor(cleaned, top_n)

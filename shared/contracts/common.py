@@ -5,8 +5,8 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-SCHEMA_VERSION = "1.0"
-"""Version of the persisted InterviewRecord format."""
+SKIPPED_ANSWER = "[skipped]"
+"""Marker stored as `answer` when the user skips a question."""
 
 SentimentLabel = Literal["negative", "neutral", "positive"]
 

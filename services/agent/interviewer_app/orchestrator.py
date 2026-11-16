@@ -7,11 +7,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from contracts import (
     ALLOWED_TOOLS_BY_PHASE,
-    END_ACTIONS,
     MIN_QUESTIONS,
     PHASE_PROMPTS,
     RESTART_COMMANDS,
@@ -37,6 +37,28 @@ def _current_user_text(ctx: Any) -> str:
     content = getattr(ctx, "user_content", None)
     parts = getattr(content, "parts", None) or []
     return " ".join(p.text for p in parts if getattr(p, "text", None)).strip()
+
+
+PHASE_USER_TURN_HANDLERS: dict[Phase, Callable[[Any, str], Any]] = {
+    Phase.MAIN_QUEUE: advance_queues_on_user_answer,
+    Phase.FOLLOWUP_QUEUE: advance_queues_on_user_answer,
+    Phase.DONE: lambda state, text: reset_interview_state(state) if text.lower() in RESTART_COMMANDS else None,
+}
+
+TOOL_RESULT_HANDLERS: dict[str, Callable[[dict[str, Any], Any], dict[str, Any]]] = {
+    "start_interview": lambda args, tool_ctx: apply_start_interview_to_state(
+        tool_ctx.state,
+        user_name=str(args.get("user_name", "")),
+        topic=str(args.get("topic", "")),
+        questions=list(args.get("questions") or []),
+        user_history=collect_user_messages_text(tool_ctx),
+    ),
+    "push_followup": lambda args, tool_ctx: apply_push_followup_to_state(
+        tool_ctx.state,
+        follow_up_question=str(args.get("follow_up_question", "")),
+        referenced_answer=str(args.get("referenced_answer", "")),
+    ),
+}
 
 
 def build_harness_instruction(ctx: ReadonlyContext) -> str:
@@ -68,7 +90,7 @@ def build_mcp_toolset(mcp_url: str | None = None) -> McpToolset:
             url=(mcp_url or settings.mcp_server_url).strip(),
             headers=headers,
         ),
-        tool_filter=["start_interview", "push_followup"],
+        tool_filter=list(TOOL_RESULT_HANDLERS.keys()),
     )
 
 
@@ -89,16 +111,17 @@ def build_interview_harness(
         state["phase"] = str(phase)
 
         user_text = _current_user_text(ctx)
-        if phase in {Phase.MAIN_QUEUE, Phase.FOLLOWUP_QUEUE} and user_text:
-            advance_queues_on_user_answer(state, user_text)
-        elif phase == Phase.DONE and user_text.lower() in RESTART_COMMANDS:
-            reset_interview_state(state)
+        turn_handler = PHASE_USER_TURN_HANDLERS.get(phase)
+        if turn_handler and user_text:
+            turn_handler(state, user_text)
 
     async def _filter_tools(ctx: Any, llm_request: Any) -> None:
         # Strip prior internal `thought` parts so LiteLLM doesn't resend them as normal assistant text.
         for content in getattr(llm_request, "contents", None) or []:
             if getattr(content, "parts", None):
-                content.parts = [p for p in content.parts if not getattr(p, "thought", False)]
+                non_thought = [p for p in content.parts if not getattr(p, "thought", False)]
+                if non_thought:
+                    content.parts = non_thought
 
         phase = Phase(ctx.state.get("phase", Phase.INTAKE))
         allowed = set(ALLOWED_TOOLS_BY_PHASE[phase])
@@ -106,31 +129,27 @@ def build_interview_harness(
         if ctx.state.get("pushed_this_turn") or not ctx.state.get("last_user_answer"):
             allowed.discard("push_followup")
 
-        # Filter ONLY `config.tools[].function_declarations` (what the LLM sees).
-        # Keep `llm_request.tools_dict` intact so ADK never crashes with "Tool not found" if the model hallucinates a call!
-        for tool_obj in getattr(getattr(llm_request, "config", None), "tools", None) or []:
-            if getattr(tool_obj, "function_declarations", None):
-                tool_obj.function_declarations = [
-                    d for d in tool_obj.function_declarations if getattr(d, "name", None) in allowed
+        # Filter `config.tools` and drop any `Tool` object whose `function_declarations` becomes empty.
+        # (Leaving `Tool(function_declarations=[])` causes ADK's `lite_llm.py` to serialize `{"functionDeclarations": []}`
+        # without a `"type": "function"` field, which OpenRouter/Nvidia rejects with HTTP 400!)
+        # Meanwhile `llm_request.tools_dict` stays intact so ADK never crashes with "Tool not found".
+        config = getattr(llm_request, "config", None)
+        if config and getattr(config, "tools", None):
+            kept_tools = []
+            for tool_obj in config.tools:
+                decls = [
+                    d
+                    for d in (getattr(tool_obj, "function_declarations", None) or [])
+                    if getattr(d, "name", None) in allowed
                 ]
+                if decls:
+                    tool_obj.function_declarations = decls
+                    kept_tools.append(tool_obj)
+            config.tools = kept_tools
 
     async def _on_tool_result(tool: Any, args: dict[str, Any], tool_ctx: Any, response: Any) -> dict[str, Any] | None:
-        tname = getattr(tool, "name", "")
-        if tname == "start_interview":
-            return apply_start_interview_to_state(
-                tool_ctx.state,
-                user_name=str(args.get("user_name", "")),
-                topic=str(args.get("topic", "")),
-                questions=list(args.get("questions") or []),
-                user_history=collect_user_messages_text(tool_ctx),
-            )
-        if tname == "push_followup":
-            return apply_push_followup_to_state(
-                tool_ctx.state,
-                follow_up_question=str(args.get("follow_up_question", "")),
-                referenced_answer=str(args.get("referenced_answer", "")),
-            )
-        return None
+        handler = TOOL_RESULT_HANDLERS.get(getattr(tool, "name", ""))
+        return handler(args, tool_ctx) if handler else None
 
     return LlmAgent(
         name=name,
@@ -149,11 +168,12 @@ InterviewOrchestrator = build_interview_harness
 
 __all__ = [
     "ALLOWED_TOOLS_BY_PHASE",
-    "END_ACTIONS",
     "InterviewOrchestrator",
+    "PHASE_USER_TURN_HANDLERS",
     "Phase",
     "STATE_MACHINE_TRANSITIONS",
     "Signal",
+    "TOOL_RESULT_HANDLERS",
     "advance_queues_on_user_answer",
     "build_harness_instruction",
     "build_interview_harness",

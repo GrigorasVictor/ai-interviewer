@@ -1,4 +1,4 @@
-"""Payloads of the NLP tools exposed by the MCP server (sentiment + keyphrases)."""
+"""NLP contracts for per-answer sentiment, session sentiment, and keyphrase extraction."""
 
 from pydantic import Field, field_validator
 
@@ -20,34 +20,9 @@ class Keyword(Contract):
         return phrase.lower()
 
 
-class AnswerInput(Contract):
-    """One item of the `analyze_answers` tool input."""
-
-    answer_id: str
-    text: str = Field(max_length=5000)
-
-
 class AnswerAnalysis(Contract):
     """NLP result for a single answer."""
 
     answer_id: str
     sentiment: Sentiment
     keywords: list[Keyword] = Field(default_factory=list, max_length=5)
-
-
-class NlpModels(Contract):
-    """Which Hugging Face models produced the results."""
-
-    sentiment: str
-    keywords: str
-
-
-class AnalyzeAnswersResult(Contract):
-    """Output of the `analyze_answers` tool."""
-
-    answers: list[AnswerAnalysis]
-    session_sentiment: Sentiment
-    models: NlpModels
-
-    def for_answer(self, answer_id: str) -> AnswerAnalysis | None:
-        return next((a for a in self.answers if a.answer_id == answer_id), None)

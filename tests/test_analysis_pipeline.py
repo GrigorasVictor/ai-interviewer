@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from analysis_app.llm_analyzers import _build_json_schema_response_format
 from analysis_app.neo4j_store import build_neo4j_parameters
 from analysis_app.pipeline import AnalysisPipeline
+from contracts import EmotionToneAnalysis, InterviewSummary
 
 
 def _sample_interview(user_id: str = "andrei", *, phase: str = "done") -> dict:
@@ -49,6 +51,37 @@ def _sample_interview(user_id: str = "andrei", *, phase: str = "done") -> dict:
     }
 
 
+def _stub_summary(record, session_sentiment, settings) -> dict:
+    return {
+        "overview": f"Summary for {record['user_name']} on {record['topic']}.",
+        "themes": [record["topic"], "Developer Velocity"],
+        "key_points": ["Faster feature delivery", "Debugging edge cases"],
+        "quotes": ["It helps me be twice as productive and ship features much faster."],
+        "sentiment_explanation": f"Overall {session_sentiment.label} ({session_sentiment.score}).",
+    }
+
+
+def _stub_insights(record, session_sentiment, settings) -> dict:
+    return {
+        "dominant_emotion": "optimism",
+        "communication_tone": "pragmatic",
+        "confidence_level": "high",
+        "pain_points": ["Still need to debug edge cases"],
+        "actionable_recommendations": ["Combine AI code generation with automated edge-case tests"],
+    }
+
+
+def test_json_schema_response_format_builds_strict_grammar_schema() -> None:
+    fmt = _build_json_schema_response_format(InterviewSummary)
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["name"] == "InterviewSummary"
+    assert "sentiment_explanation" in fmt["json_schema"]["schema"]["properties"]
+
+    fmt_insights = _build_json_schema_response_format(EmotionToneAnalysis)
+    assert fmt_insights["json_schema"]["name"] == "EmotionToneAnalysis"
+    assert "dominant_emotion" in fmt_insights["json_schema"]["schema"]["properties"]
+
+
 def test_analysis_pipeline_waits_for_done_then_sets_processed_flag(tmp_path: Path) -> None:
     """Skips `in_progress` interviews, processes `done` interviews with `processed=False`, and skips once `processed=True`."""
     in_progress_file = tmp_path / "victor.json"
@@ -63,7 +96,11 @@ def test_analysis_pipeline_waits_for_done_then_sets_processed_flag(tmp_path: Pat
         encoding="utf-8",
     )
 
-    pipeline = AnalysisPipeline(use_llm=False)
+    pipeline = AnalysisPipeline(
+        summary_fn=_stub_summary,
+        insights_fn=_stub_insights,
+        sync_neo4j=False,
+    )
 
     # 1. First scan: `victor.json` is skipped (`in_progress`), `andrei.json` is analyzed and marked `processed=True`.
     summary1 = pipeline.process_directory(tmp_path)
@@ -81,9 +118,8 @@ def test_analysis_pipeline_waits_for_done_then_sets_processed_flag(tmp_path: Pat
     assert report["session_sentiment"]["label"] in {"positive", "neutral", "negative"}
     assert len(report["summary"]["themes"]) >= 2
     assert len(report["summary"]["key_points"]) >= 2
-    assert "dominant_emotion" in report["emotion_and_insights"]
-    assert len(report["emotion_and_insights"]["actionable_recommendations"]) >= 1
-    assert "neo4j" in report
+    assert report["emotion_and_insights"]["dominant_emotion"] == "optimism"
+    assert len(report["emotion_and_insights"]["actionable_recommendations"]) == 1
 
     # Verify Neo4j parameters built from the analyzed record.
     neo4j_params = build_neo4j_parameters(enriched)
