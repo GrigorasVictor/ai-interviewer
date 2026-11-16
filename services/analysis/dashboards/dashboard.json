@@ -1,0 +1,319 @@
+{
+  "title": "AI Interview Insights",
+  "version": "2.4",
+  "settings": {
+    "pagenumber": 0,
+    "editable": true,
+    "fullscreenEnabled": true,
+    "parameters": {},
+    "theme": "dark"
+  },
+  "pages": [
+    {
+      "title": "Overview & Mini-Graphs",
+      "reports": [
+        {
+          "id": "ea76dd77-1f90-48f3-a022-7322c9690001",
+          "title": "Total Interviews",
+          "query": "MATCH (i:Interview)\nRETURN count(i) AS Total",
+          "width": 6,
+          "height": 2,
+          "x": 0,
+          "y": 0,
+          "type": "value",
+          "selection": {},
+          "settings": {}
+        },
+        {
+          "id": "ea76dd77-1f90-48f3-a022-7322c9690002",
+          "title": "Total Participants",
+          "query": "MATCH (u:User)\nRETURN count(u) AS Total",
+          "width": 6,
+          "height": 2,
+          "x": 6,
+          "y": 0,
+          "type": "value",
+          "selection": {},
+          "settings": {}
+        },
+        {
+          "id": "ea76dd77-1f90-48f3-a022-7322c9690003",
+          "title": "Answers Analyzed",
+          "query": "MATCH (a:Answer)\nWHERE a.sentiment_label IS NOT NULL\nRETURN count(a) AS Total",
+          "width": 6,
+          "height": 2,
+          "x": 12,
+          "y": 0,
+          "type": "value",
+          "selection": {},
+          "settings": {}
+        },
+        {
+          "id": "ea76dd77-1f90-48f3-a022-7322c9690004",
+          "title": "Unique Keywords Extracted",
+          "query": "MATCH (k:Keyword)\nRETURN count(k) AS Total",
+          "width": 6,
+          "height": 2,
+          "x": 18,
+          "y": 0,
+          "type": "value",
+          "selection": {},
+          "settings": {}
+        },
+        {
+          "id": "75e42aed-0d26-4dd6-a0ad-9faa79a22416",
+          "title": "Sentiment Distribution (Bar)",
+          "query": "MATCH (i:Interview)\nRETURN i.sentiment_label AS Sentiment, count(i) AS Interviews",
+          "width": 8,
+          "height": 4,
+          "x": 0,
+          "y": 2,
+          "type": "bar",
+          "selection": {
+            "index": "Sentiment",
+            "value": "Interviews",
+            "key": "(none)"
+          },
+          "settings": {},
+          "schema": []
+        },
+        {
+          "id": "7910614a-d4ea-45d2-ad42-23130552c48b",
+          "title": "Sentiment Share (Pie)",
+          "query": "MATCH (i:Interview)\nRETURN i.sentiment_label AS Sentiment, count(i) AS Interviews",
+          "width": 8,
+          "height": 4,
+          "x": 8,
+          "y": 2,
+          "type": "pie",
+          "selection": {
+            "index": "Sentiment",
+            "value": "Interviews",
+            "key": "(none)"
+          },
+          "settings": {},
+          "schema": []
+        },
+        {
+          "id": "7910614a-d4ea-45d2-ad42-23130552c48c",
+          "title": "Dominant Emotions Breakdown",
+          "query": "MATCH (i:Interview)-[:EXPRESSES_EMOTION]->(e:Emotion)\nRETURN e.name AS Emotion, count(i) AS Interviews",
+          "width": 8,
+          "height": 4,
+          "x": 16,
+          "y": 2,
+          "type": "bar",
+          "selection": {
+            "index": "Emotion",
+            "value": "Interviews",
+            "key": "(none)"
+          },
+          "settings": {},
+          "schema": []
+        },
+        {
+          "id": "ea76dd77-1f90-48f3-a022-7322c9698a36",
+          "title": "Interview Overview & Sentiment Summary",
+          "query": "MATCH (u:User)-[:PARTICIPATED_IN]->(i:Interview)-[:EXPLORES_TOPIC]->(t:Topic)\nRETURN u.name AS Participant,\n       t.name AS Topic,\n       i.sentiment_label AS Sentiment,\n       round(i.sentiment_score, 3) AS Score,\n       i.dominant_emotion AS Emotion,\n       i.communication_tone AS Tone,\n       i.confidence_level AS Confidence,\n       i.overview AS Overview\nORDER BY i.analyzed_at DESC",
+          "width": 24,
+          "height": 4,
+          "x": 0,
+          "y": 6,
+          "type": "table",
+          "selection": {},
+          "settings": {}
+        },
+        {
+          "id": "46bada7c-3da7-4a12-9d2b-6334014f0001",
+          "title": "Mini-Graph 1: Topics, Themes & Emotions",
+          "query": "MATCH (u:User)-[r1:PARTICIPATED_IN]->(i:Interview)-[r2:EXPLORES_TOPIC]->(t:Topic)\nOPTIONAL MATCH (i)-[r3:HIGHLIGHTS_THEME]->(th:Theme)\nOPTIONAL MATCH (i)-[r4:EXPRESSES_EMOTION]->(e:Emotion)\nOPTIONAL MATCH (i)-[r5:HAS_OVERALL_SENTIMENT]->(s:Sentiment)\nRETURN u, r1, i, r2, t, r3, th, r4, e, r5, s",
+          "width": 8,
+          "height": 5,
+          "x": 0,
+          "y": 10,
+          "type": "graph",
+          "selection": {
+            "User": "name",
+            "Interview": "sentiment_label",
+            "Topic": "name",
+            "Theme": "name",
+            "Emotion": "name",
+            "Sentiment": "label"
+          },
+          "settings": {},
+          "schema": [
+            ["User", "name", "id"],
+            ["Interview", "sentiment_label", "sentiment_score", "dominant_emotion", "id"],
+            ["Topic", "name"],
+            ["Theme", "name"],
+            ["Emotion", "name"],
+            ["Sentiment", "label"]
+          ]
+        },
+        {
+          "id": "46bada7c-3da7-4a12-9d2b-6334014f0002",
+          "title": "Mini-Graph 2: Answers & Keywords Network",
+          "query": "MATCH (u:User)-[r1:PARTICIPATED_IN]->(i:Interview)-[r2:HAS_ANSWER]->(a:Answer)\nOPTIONAL MATCH (a)-[r3:MENTIONS_KEYWORD]->(k:Keyword)\nOPTIONAL MATCH (a)-[r4:HAS_SENTIMENT]->(s:Sentiment)\nRETURN u, r1, i, r2, a, r3, k, r4, s\nLIMIT 60",
+          "width": 8,
+          "height": 5,
+          "x": 8,
+          "y": 10,
+          "type": "graph",
+          "selection": {
+            "User": "name",
+            "Interview": "id",
+            "Answer": "question",
+            "Keyword": "phrase",
+            "Sentiment": "label"
+          },
+          "settings": {},
+          "schema": [
+            ["User", "name", "id"],
+            ["Interview", "id"],
+            ["Answer", "question", "answer", "index", "sentiment_label", "sentiment_score", "id"],
+            ["Keyword", "phrase"],
+            ["Sentiment", "label"]
+          ]
+        },
+        {
+          "id": "46bada7c-3da7-4a12-9d2b-6334014f0003",
+          "title": "Mini-Graph 3: Pain Points & Recommendations Map",
+          "query": "MATCH (u:User)-[r1:PARTICIPATED_IN]->(i:Interview)\nOPTIONAL MATCH (i)-[r2:REVEALS_PAIN_POINT]->(p:PainPoint)\nOPTIONAL MATCH (i)-[r3:SUGGESTS_RECOMMENDATION]->(rec:Recommendation)\nRETURN u, r1, i, r2, p, r3, rec",
+          "width": 8,
+          "height": 5,
+          "x": 16,
+          "y": 10,
+          "type": "graph",
+          "selection": {
+            "User": "name",
+            "Interview": "dominant_emotion",
+            "PainPoint": "text",
+            "Recommendation": "text"
+          },
+          "settings": {},
+          "schema": [
+            ["User", "name", "id"],
+            ["Interview", "dominant_emotion", "confidence_level", "id"],
+            ["PainPoint", "text"],
+            ["Recommendation", "text"]
+          ]
+        },
+        {
+          "id": "46bada7c-3da7-4a12-9d2b-6334014fe5f1",
+          "title": "Full Knowledge Graph",
+          "query": "MATCH p = (u:User)-[:PARTICIPATED_IN]->(i:Interview)-[*1..2]->()\nRETURN p",
+          "width": 24,
+          "height": 5,
+          "x": 0,
+          "y": 15,
+          "type": "graph",
+          "selection": {
+            "User": "name",
+            "Interview": "id",
+            "Topic": "name",
+            "Sentiment": "label",
+            "Emotion": "name",
+            "Theme": "name",
+            "PainPoint": "text",
+            "Recommendation": "text",
+            "Answer": "question",
+            "Keyword": "phrase"
+          },
+          "settings": {},
+          "schema": [
+            ["User", "name", "id"],
+            [
+              "Interview",
+              "sentiment_score",
+              "overview",
+              "completed_at",
+              "dominant_emotion",
+              "confidence_level",
+              "communication_tone",
+              "analyzed_at",
+              "sentiment_label",
+              "id"
+            ],
+            ["Topic", "name"],
+            ["Sentiment", "label"],
+            ["Emotion", "name"],
+            ["Theme", "name"],
+            ["PainPoint", "text"],
+            ["Recommendation", "text"],
+            [
+              "Answer",
+              "sentiment_score",
+              "question",
+              "answer",
+              "index",
+              "answered_at",
+              "source",
+              "id",
+              "sentiment_label"
+            ],
+            ["Keyword", "phrase"]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Detailed Tables & Analytics",
+      "reports": [
+        {
+          "id": "204d0bc8-c001-4281-9fed-9042229612f6",
+          "title": "Answers, Per-Turn Sentiment & Extracted Keywords",
+          "query": "MATCH (u:User)-[:PARTICIPATED_IN]->(i:Interview)-[:HAS_ANSWER]->(a:Answer)\nOPTIONAL MATCH (a)-[:MENTIONS_KEYWORD]->(k:Keyword)\nRETURN u.name AS Participant,\n       a.index AS Turn,\n       a.source AS Queue,\n       a.question AS Question,\n       a.answer AS Answer,\n       coalesce(a.sentiment_label, 'skipped') AS Sentiment,\n       round(coalesce(a.sentiment_score, 0.0), 3) AS Score,\n       collect(k.phrase) AS Keywords\nORDER BY Participant, Turn",
+          "width": 24,
+          "height": 5,
+          "x": 0,
+          "y": 0,
+          "type": "table",
+          "selection": {},
+          "settings": {}
+        },
+        {
+          "id": "c110e1ca-7136-488a-9774-483dfbfea0c2",
+          "title": "Themes, Pain Points & Actionable Recommendations",
+          "query": "MATCH (u:User)-[:PARTICIPATED_IN]->(i:Interview)-[:EXPLORES_TOPIC]->(t:Topic)\nOPTIONAL MATCH (i)-[:HIGHLIGHTS_THEME]->(th:Theme)\nOPTIONAL MATCH (i)-[:REVEALS_PAIN_POINT]->(p:PainPoint)\nOPTIONAL MATCH (i)-[:SUGGESTS_RECOMMENDATION]->(r:Recommendation)\nRETURN u.name AS Participant,\n       t.name AS Topic,\n       collect(DISTINCT th.name) AS Themes,\n       collect(DISTINCT p.text) AS PainPoints,\n       collect(DISTINCT r.text) AS Recommendations\nORDER BY Participant",
+          "width": 14,
+          "height": 4,
+          "x": 0,
+          "y": 5,
+          "type": "table",
+          "selection": {},
+          "settings": {}
+        },
+        {
+          "id": "c110e1ca-7136-488a-9774-483dfbfe0003",
+          "title": "Top Recurring Keywords Across Answers",
+          "query": "MATCH (t:Topic)<-[:EXPLORES_TOPIC]-(:Interview)-[:HAS_ANSWER]->(a:Answer)-[:MENTIONS_KEYWORD]->(k:Keyword)\nRETURN k.phrase AS Keyword,\n       count(DISTINCT a) AS Mentions,\n       round(avg(a.sentiment_score), 3) AS AvgSentimentScore,\n       collect(DISTINCT t.name) AS Topics\nORDER BY Mentions DESC, Keyword ASC\nLIMIT 25",
+          "width": 10,
+          "height": 4,
+          "x": 14,
+          "y": 5,
+          "type": "table",
+          "selection": {},
+          "settings": {}
+        },
+        {
+          "id": "c110e1ca-7136-488a-9774-483dfbfe0004",
+          "title": "Topic Aggregated Sentiment & Emotions",
+          "query": "MATCH (t:Topic)<-[:EXPLORES_TOPIC]-(i:Interview)\nRETURN t.name AS Topic,\n       count(i) AS Interviews,\n       round(avg(i.sentiment_score), 3) AS AvgSentimentScore,\n       collect(DISTINCT i.sentiment_label) AS Sentiments,\n       collect(DISTINCT i.dominant_emotion) AS Emotions\nORDER BY Interviews DESC",
+          "width": 24,
+          "height": 4,
+          "x": 0,
+          "y": 9,
+          "type": "table",
+          "selection": {},
+          "settings": {}
+        }
+      ]
+    }
+  ],
+  "parameters": {},
+  "extensions": {
+    "active": true,
+    "activeReducers": []
+  },
+  "uuid": "6d6c40d0-18c5-4de4-a925-60ac59faecbf"
+}

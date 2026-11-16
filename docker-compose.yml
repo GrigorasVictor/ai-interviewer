@@ -13,6 +13,22 @@ services:
       - neo4j_logs:/logs
     restart: unless-stopped
 
+  neodash:
+    image: neo4jlabs/neodash:latest
+    container_name: interviewer-neodash
+    depends_on:
+      - neo4j
+    environment:
+      NGINX_PORT: ${NEODASH_PORT:-5005}
+      standalone: ${NEODASH_STANDALONE:-false}
+      standaloneProtocol: ${NEODASH_PROTOCOL:-bolt}
+      standaloneHost: ${NEODASH_HOST:-localhost}
+      standalonePort: ${NEODASH_NEO4J_PORT:-7687}
+      standaloneDatabase: ${NEODASH_DATABASE:-neo4j}
+    ports:
+      - "${NEODASH_PORT:-5005}:${NEODASH_PORT:-5005}"
+    restart: unless-stopped
+
   mcp:
     build:
       context: .
