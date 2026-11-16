@@ -31,16 +31,16 @@ flowchart TB
         AG["agent<br/>adk web :8000<br/>InterviewOrchestrator"]
         MC["mcp<br/>FastMCP :8001 /mcp<br/>/health"]
         NJ[("neo4j<br/>:7474 / :7687")]
-        OL["ollama :11434<br/>(optional)"]
+        OL["ollama :11434<br/>(local LLM)"]
     end
 
-    GEM["Gemini API<br/>(external)"]
+    OR["OpenRouter API<br/>(optional cloud LLM)"]
 
     B -->|"HTTP"| AG
     NB -->|"HTTP + Bolt"| NJ
     AG -->|"MCP Streamable HTTP"| MC
-    AG -->|"LLM calls"| GEM
-    AG -.->|"LLM calls (alt)"| OL
+    AG -->|"LiteLLM"| OL
+    AG -.->|"LiteLLM (alt)"| OR
     MC -->|"Bolt"| NJ
     MC -->|"atomic write"| DATA
 ```
@@ -50,7 +50,7 @@ flowchart TB
 | From → To | Protocol | Purpose | Failure handling |
 |---|---|---|---|
 | Browser → agent | HTTP / SSE (`adk web`) | Chat UI | — |
-| agent → LLM | HTTPS (Gemini) or HTTP (Ollama via LiteLLM) | Intake, planning, questions, summary | Retry with backoff (max 2); then apologetic message, state unchanged |
+| agent → LLM | HTTP (Ollama) or HTTPS (OpenRouter) via `LiteLlm` | Intake, planning, questions, summary | Validated with Pydantic; deterministic fallback if a small local model returns malformed JSON |
 | agent → mcp | MCP over Streamable HTTP | NLP + persistence tools | Timeout 60 s for NLP, 30 s for save; 1 retry; surfaced to user if still failing |
 | mcp → neo4j | Bolt | Graph ingestion | Non-fatal; record saved with `neo4j_synced: false` |
 | mcp → disk | File I/O | JSON persistence | Fatal for `save_interview` (returns error status) |
@@ -62,7 +62,7 @@ flowchart TB
 - **agent** is the only service that talks to an LLM and the only one that keeps conversation state.
 - **mcp** is the only service that touches `data/` and Neo4j, and the only one with ML dependencies.
 - **neo4j** is passive storage; schema constraints are created by `mcp` at startup (idempotent).
-- Contracts between `agent` and `mcp` are the MCP tool signatures in [`MCP_SERVICE.md`](MCP_SERVICE.md) and the schemas in [`DATA_MODEL.md`](DATA_MODEL.md). Each service keeps its own copy of the Pydantic models; a contract test guards drift.
+- Contracts between `agent` and `mcp` live in the shared `shared/contracts/` package (installed in both environments) and are documented in [`DATA_MODEL.md`](DATA_MODEL.md).
 
 ---
 
@@ -72,13 +72,14 @@ flowchart TB
 sequenceDiagram
     actor User
     participant AG as agent (Orchestrator)
-    participant LLM as LLM
+    participant LLM as LLM (Ollama / OpenRouter)
     participant MC as mcp
     participant NJ as neo4j
 
     User->>AG: "Hi, I'm Ana, topic: AI in the workplace"
     AG->>LLM: IntakeAgent (extract name + topic)
     AG->>LLM: PlannerAgent (build rubric, 3-5 areas)
+    AG->>LLM: InterviewerAgent (Question 1)
     AG-->>User: Rubric areas + privacy notice + Question 1
     loop 3-5 questions
         User->>AG: answer
@@ -95,7 +96,7 @@ sequenceDiagram
     MC->>MC: atomic write to interviews_output.json
     MC->>NJ: MERGE graph (single transaction)
     NJ-->>MC: ok / unavailable
-    MC-->>AG: {json: ok, neo4j: ok|skipped|error, cypher_query}
+    MC-->>AG: {json_file: ok, neo4j: ok|skipped|error, cypher_query}
     AG-->>User: Summary + NLP metrics + persistence status + Cypher query
 ```
 
@@ -108,9 +109,9 @@ sequenceDiagram
 | Neo4j down or not configured | `mcp` starts anyway (health reports `neo4j: down`); `save_interview` writes JSON, returns `neo4j.status = "skipped"`; user sees a warning line |
 | `mcp` down at agent startup | `agent` waits (Compose `depends_on: service_healthy`) |
 | `mcp` down mid-interview | Questions continue (no MCP needed); at analysis, retry once, then tell the user analysis failed and keep `phase = analysis` so the next message retries |
-| LLM returns invalid structured output | Pydantic validation fails → one re-prompt with the validation error; then deterministic fallback (e.g., generic question for the next uncovered area) |
+| LLM returns invalid structured output | Caught in orchestrator → deterministic fallback (regex intake / default 3-area rubric / generic question for the next uncovered area) so the interview never crashes |
 | User sends empty / one-word answer | One clarification request that does **not** consume a question slot |
-| Agent container restarts mid-interview | Session restored from `agent_sessions` (SQLite via `DatabaseSessionService`); orchestrator resumes from `phase` |
+| Agent container restarts mid-interview | Session restored from `agent_sessions` (SQLite); orchestrator resumes from `phase` |
 | Duplicate save (retry after timeout) | Idempotent: `interview_id` is the key in JSON and in Neo4j `MERGE` |
 
 ---
@@ -126,3 +127,4 @@ sequenceDiagram
 | D5 | JSON-first, Neo4j best-effort with `neo4j_synced` flag | Meets "simple storage" requirement unconditionally; graph can be re-synced later | Neo4j as source of truth |
 | D6 | Models baked into the `mcp` image at build time | Fast, offline, deterministic startup | Download on first request (slow, needs internet at runtime) |
 | D7 | Sub-agents use `include_contents="none"` + state templating | Each LLM call gets exactly the context it needs; smaller prompts, works with small local models | Full conversation history in every call |
+| D8 | Provider-agnostic LLM via `LiteLlm` only | Same code runs against local Ollama (`ollama_chat/...`) and cloud OpenRouter (`openrouter/...`) by changing `.env` | Provider-specific SDKs |

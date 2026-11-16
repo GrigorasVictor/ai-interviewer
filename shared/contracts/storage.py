@@ -4,7 +4,8 @@ from typing import Literal
 
 from pydantic import Field
 
-from .common import Contract, Sentiment
+from .common import Contract
+from .nlp import Sentiment
 
 
 class JsonSaveStatus(Contract):

@@ -13,6 +13,7 @@
 | [`DATA_MODEL.md`](DATA_MODEL.md) | Pydantic schemas, JSON file format, Neo4j graph schema, Cypher queries |
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | Docker Compose services, env vars, volumes, healthchecks, run commands |
 | [`ROADMAP.md`](ROADMAP.md) | Implementation milestones with per-milestone acceptance checks |
+| [`../.venv/CODE_WALKTHROUGH.md`](../.venv/CODE_WALKTHROUGH.md) | Deep-dive explanation (conceptual + line-by-line) of the orchestrator & agents |
 
 **Precedence when documents disagree:** `DATA_MODEL.md` (contracts) > service specs > `ARCHITECTURE.md` > `GOALS.md`. Fix the inconsistency in the same change.
 
@@ -48,7 +49,7 @@ The system runs as **three Docker microservices** (agent, MCP tools server, Neo4
 ```mermaid
 flowchart LR
     U["User (browser)"] -->|"HTTP :8000 (adk web)"| A["agent service<br/>Google ADK harness"]
-    A -->|"LLM API"| L["LLM provider<br/>Gemini API or Ollama"]
+    A -->|"LiteLLM"| L["LLM provider<br/>Ollama (local) or OpenRouter (cloud)"]
     A -->|"MCP over Streamable HTTP<br/>http://mcp:8001/mcp"| M["mcp service<br/>NLP + storage tools"]
     M -->|"Bolt :7687"| N[("neo4j service")]
     M --> J[("data/ volume<br/>interviews_output.json")]
@@ -90,12 +91,12 @@ flowchart LR
 | Layer | Choice |
 |---|---|
 | Agent framework | `google-adk` (custom `BaseAgent` orchestrator + `LlmAgent` sub-agents) |
-| LLM | Configurable: Gemini (`gemini-2.5-flash`) via `GOOGLE_API_KEY`, or local Ollama via `LiteLlm` |
+| LLM | `LiteLlm` — local Ollama (`ollama_chat/...`) during dev, or cloud via OpenRouter (`openrouter/...`) |
 | Tool protocol | MCP (official `mcp` Python SDK, `FastMCP`, Streamable HTTP transport) |
 | NLP | `transformers`, `torch` (CPU), `keybert`, `sentence-transformers` |
 | Graph DB | Neo4j 5 Community + official `neo4j` Python driver |
 | Validation | `pydantic` v2 |
-| Runtime | Python 3.12 slim images, Docker Compose v2 |
+| Runtime | Python 3.12+ slim images, Docker Compose v2 |
 
 ---
 
@@ -103,11 +104,21 @@ flowchart LR
 
 ```text
 Yonder/                               # repo root
-├── .agents/                          # specs (this folder)
+├── .agents/                          # specs + walkthrough (this folder)
 ├── docker-compose.yml
-├── .env.example
+├── sample.env
+├── .env                              # git-ignored
 ├── README.md                         # quick start, architecture summary, Cypher queries
 ├── data/                             # bind-mounted into mcp → interviews_output.json
+├── shared/
+│   ├── pyproject.toml
+│   └── contracts/                    # single source of truth for Pydantic models
+│       ├── __init__.py
+│       ├── common.py
+│       ├── llm_outputs.py
+│       ├── nlp.py
+│       ├── record.py
+│       └── storage.py
 ├── services/
 │   ├── agent/
 │   │   ├── Dockerfile
@@ -115,36 +126,27 @@ Yonder/                               # repo root
 │   │   └── interviewer_app/          # ADK agent package (discovered by `adk web`)
 │   │       ├── __init__.py
 │   │       ├── agent.py              # exposes root_agent
+│   │       ├── config.py             # env + LiteLlm factory (Ollama / OpenRouter)
+│   │       ├── schemas.py            # re-exports from `contracts`
 │   │       ├── orchestrator.py       # InterviewOrchestrator (custom BaseAgent, state machine)
-│   │       ├── sub_agents.py         # Intake, Planner, Interviewer, Summarizer LlmAgents
-│   │       ├── steps.py              # EnrichmentStep, PersistStep (custom agents calling MCP)
-│   │       ├── mcp_client.py         # thin MCP client wrapper (Streamable HTTP)
-│   │       ├── prompts.py
-│   │       ├── schemas.py            # mirrors DATA_MODEL.md
-│   │       └── config.py
+│   │       └── agents/
+│   │           ├── __init__.py
+│   │           ├── prompts.py        # modular system prompts for each stage
+│   │           ├── intake.py         # IntakeAgent
+│   │           ├── planner.py        # PlannerAgent
+│   │           └── interviewer.py    # InterviewerAgent
 │   └── mcp/
 │       ├── Dockerfile
 │       ├── requirements.txt          # mcp, torch (cpu), transformers, keybert, sentence-transformers, neo4j, pydantic
 │       └── mcp_server/
 │           ├── __init__.py
-│           ├── server.py             # FastMCP app, tool registration, /health
-│           ├── config.py
-│           ├── schemas.py            # mirrors DATA_MODEL.md
-│           ├── nlp/
-│           │   ├── sentiment.py
-│           │   └── keywords.py
-│           ├── storage/
-│           │   ├── json_store.py
-│           │   └── neo4j_store.py
-│           ├── seed_demo.py
-│           └── download_models.py    # used at image build time
+│           └── server.py             # FastMCP app, tool registration, /health
+├── scripts/
+│   └── try_interview.py              # interactive CLI runner (--mock or live Ollama/OpenRouter)
 └── tests/
-    ├── agent/
-    ├── mcp/
-    └── e2e/
+    ├── test_contracts.py
+    └── test_orchestrator.py
 ```
-
-> `my_agent/` is the initial ADK prototype. It is superseded by `services/agent/interviewer_app/` and should be removed once milestone M3 is done. Never commit `.env` files.
 
 ---
 

@@ -8,12 +8,63 @@ from pydantic import Field, field_validator
 
 from .common import Contract
 
+_PLACEHOLDER_VALUES = {
+    "",
+    "none",
+    "(none)",
+    "null",
+    "(null)",
+    "nil",
+    "n/a",
+    "na",
+    "unknown",
+    "(unknown)",
+    "unspecified",
+    "not provided",
+    "not specified",
+    "not mentioned",
+    "missing",
+    "user",
+    "participant",
+    "topic",
+    "the topic",
+    "hi",
+    "hello",
+    "hey",
+    "salut",
+    "buna",
+}
+
 
 class IntakeResult(Contract):
-    """Output of IntakeAgent: who is being interviewed and about what."""
+    """Output of IntakeAgent: who is being interviewed, about what, and how to ask for any missing piece."""
 
-    user_name: str | None = Field(default=None, description="The participant's name or ID, exactly as given. Null if not provided.")
-    topic: str | None = Field(default=None, max_length=120, description="The interview topic, short and normalized. Null if not provided.")
+    user_name: str | None = Field(
+        default=None,
+        description="The participant's name or ID, if explicitly stated by the user; otherwise null.",
+    )
+    topic: str | None = Field(
+        default=None,
+        max_length=120,
+        description="The interview topic, if explicitly stated by the user; otherwise null.",
+    )
+    follow_up_question: str | None = Field(
+        default=None,
+        description=(
+            "Required when `user_name` or `topic` is null: a friendly 1-2 sentence question "
+            "asking the user for whichever piece is still missing. Null only when both are known."
+        ),
+    )
+
+    @field_validator("user_name", "topic", mode="before")
+    @classmethod
+    def _clean_placeholder(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip().strip("\"'")
+        if text.casefold() in _PLACEHOLDER_VALUES:
+            return None
+        return text
 
     @property
     def is_complete(self) -> bool:
@@ -50,7 +101,7 @@ class InterviewerTurn(Contract):
     """Output of InterviewerAgent: the next question to ask."""
 
     area: str = Field(description="Exactly one of the rubric area names.")
-    question: str = Field(min_length=5, description="A single open-ended, neutral question.")
+    question: str = Field(min_length=5, description="A single open-ended question addressed directly to the user ('you').")
     is_follow_up: bool = Field(default=False, description="True if the question builds on the previous answer.")
     coverage_complete: bool = Field(default=False, description="True only if every rubric area has been covered.")
 
