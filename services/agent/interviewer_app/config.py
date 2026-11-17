@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from contracts import MAX_QUESTIONS, MIN_QUESTIONS
 from dotenv import load_dotenv
 from google.adk.models import LiteLlm
 
@@ -22,13 +23,13 @@ _REPO_ROOT = _PARENTS[3] if len(_PARENTS) > 3 else _PARENTS[-1]
 load_dotenv(_REPO_ROOT / ".env", override=False)
 
 
-def _parse_optional_positive_int(raw: str) -> int | None:
+def _parse_optional_positive_int(raw: str, var_name: str = "INTERVIEW_NUM_QUESTIONS") -> int | None:
     raw = raw.strip()
     if not raw:
         return None
     value = int(raw)
     if value < 1:
-        raise ValueError(f"INTERVIEW_NUM_QUESTIONS must be >= 1, got {value}")
+        raise ValueError(f"{var_name} must be >= 1, got {value}")
     return value
 
 
@@ -46,6 +47,8 @@ class AgentSettings:
     llm_model: str
     ollama_api_base: str
     llm_thinking: bool
+    min_questions: int
+    max_questions: int
     num_questions_override: int | None
     mcp_server_url: str
     mcp_auth_token: str
@@ -54,12 +57,25 @@ class AgentSettings:
 
 def load_settings() -> AgentSettings:
     """Read settings from environment variables with sensible local defaults."""
+    min_q = _parse_optional_positive_int(
+        os.getenv("INTERVIEW_MIN_QUESTIONS", ""),
+        "INTERVIEW_MIN_QUESTIONS",
+    ) or MIN_QUESTIONS
+    raw_max = _parse_optional_positive_int(
+        os.getenv("INTERVIEW_MAX_QUESTIONS", ""),
+        "INTERVIEW_MAX_QUESTIONS",
+    ) or MAX_QUESTIONS
+    max_q = max(min_q, raw_max)
+
     return AgentSettings(
         llm_model=os.getenv("LLM_MODEL", "ollama_chat/qwen3:1.7b").strip(),
         ollama_api_base=os.getenv("OLLAMA_API_BASE", "http://localhost:11434").strip(),
         llm_thinking=_parse_bool(os.getenv("LLM_THINKING", "true"), default=True),
+        min_questions=min_q,
+        max_questions=max_q,
         num_questions_override=_parse_optional_positive_int(
-            os.getenv("INTERVIEW_NUM_QUESTIONS", "")
+            os.getenv("INTERVIEW_NUM_QUESTIONS", ""),
+            "INTERVIEW_NUM_QUESTIONS",
         ),
         mcp_server_url=os.getenv("MCP_SERVER_URL", "http://localhost:8001/mcp").strip(),
         mcp_auth_token=os.getenv("MCP_AUTH_TOKEN", "").strip(),

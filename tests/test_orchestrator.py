@@ -22,6 +22,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.tools.mcp_tool import McpToolset
 from google.genai import types
 
+from interviewer_app.config import load_settings
 from interviewer_app.orchestrator import (
     build_harness_instruction,
     build_interview_harness,
@@ -52,6 +53,45 @@ def test_intake_blocks_hallucinated_name_or_topic() -> None:
     )
     assert res["status"] == "wait_for_user"
     assert state["phase"] == str(Phase.INTAKE)
+
+
+def test_min_and_max_questions_configurable_via_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`INTERVIEW_MIN_QUESTIONS` and `INTERVIEW_MAX_QUESTIONS` control validation bounds and queue cap."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("INTERVIEW_MIN_QUESTIONS", "2")
+    monkeypatch.setenv("INTERVIEW_MAX_QUESTIONS", "4")
+    monkeypatch.setenv("INTERVIEW_NUM_QUESTIONS", "")
+
+    settings = load_settings()
+    assert settings.min_questions == 2
+    assert settings.max_questions == 4
+    assert settings.num_questions_override is None
+
+    # 1 question is below INTERVIEW_MIN_QUESTIONS=2 -> rejected.
+    state: dict[str, Any] = {"phase": str(Phase.INTAKE)}
+    too_few = apply_start_interview_to_state(
+        state,
+        user_name="Victor",
+        topic="Remote work",
+        questions=["Q1?"],
+        user_history="Victor, Remote work",
+    )
+    assert too_few["status"] == "invalid_questions"
+    assert "at least 2" in too_few["next_step"]
+
+    # 6 questions are trimmed to INTERVIEW_MAX_QUESTIONS=4 (Q1 popped + 3 left in queue).
+    ready = apply_start_interview_to_state(
+        state,
+        user_name="Victor",
+        topic="Remote work",
+        questions=["Q1?", "Q2?", "Q3?", "Q4?", "Q5?", "Q6?"],
+        user_history="Victor, Remote work",
+    )
+    assert ready["status"] == "ready"
+    assert state["current_question"] == "Q1?"
+    assert state["question_queue"] == ["Q2?", "Q3?", "Q4?"]
 
 
 def test_two_queues_main_then_followup_then_per_user_json_save(

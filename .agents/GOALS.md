@@ -1,4 +1,4 @@
-# GOALS.md — Mini AI Interviewer (Anthropic Interviewer–style, Dockerized Microservices)
+# GOALS.md — Mini AI Interviewer (Dockerized Microservices)
 
 > **Entry point for every contributor / coding agent.** Read this file first, then the linked specs.
 
@@ -6,41 +6,41 @@
 
 | File | Purpose |
 |---|---|
-| [`GOALS.md`](GOALS.md) | Objective, requirements, high-level architecture, acceptance criteria (this file) |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Service topology, communication, data flow, failure modes, design decisions |
-| [`AGENT_SERVICE.md`](AGENT_SERVICE.md) | Google ADK harness: orchestrator state machine, sub-agents, session state, MCP client |
-| [`MCP_SERVICE.md`](MCP_SERVICE.md) | MCP server: tool contracts, Hugging Face NLP, JSON + Neo4j persistence |
-| [`DATA_MODEL.md`](DATA_MODEL.md) | Pydantic schemas, JSON file format, Neo4j graph schema, Cypher queries |
-| [`DEPLOYMENT.md`](DEPLOYMENT.md) | Docker Compose services, env vars, volumes, healthchecks, run commands |
-| [`ROADMAP.md`](ROADMAP.md) | Implementation milestones with per-milestone acceptance checks |
-| [`../.venv/CODE_WALKTHROUGH.md`](../.venv/CODE_WALKTHROUGH.md) | Deep-dive explanation (conceptual + line-by-line) of the orchestrator & agents |
+| [`GOALS.md`](GOALS.md) | Objective, requirements, architecture overview, repo structure (this file) |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Service topology, communication matrix, end-to-end flow, failure modes |
+| [`AGENT_SERVICE.md`](AGENT_SERVICE.md) | Google ADK Two-Queue `LlmAgent` harness, callbacks, state-machine integration |
+| [`MCP_SERVICE.md`](MCP_SERVICE.md) | MCP Streamable HTTP tools server (`start_interview`, `push_followup`) + `analysis` NLP/LLM pipeline |
+| [`DATA_MODEL.md`](DATA_MODEL.md) | Shared Pydantic contracts, `data/<user_id>.json` lifecycle, Neo4j graph schema |
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) | Docker Compose setup (`neo4j`, `neodash`, `mcp`, `agent`, `analysis`), env vars, commands |
+| [`ROADMAP.md`](ROADMAP.md) | Implementation milestones & verification status |
 
-**Precedence when documents disagree:** `DATA_MODEL.md` (contracts) > service specs > `ARCHITECTURE.md` > `GOALS.md`. Fix the inconsistency in the same change.
+**Precedence when documents disagree:** `shared/contracts/` & source code > `DATA_MODEL.md` > service specs > `ARCHITECTURE.md` > `GOALS.md`.
 
 ---
 
 ## 1. Project Objective
 
-Build an interactive **Mini AI Interviewer** inspired by the *Anthropic Interviewer* architecture — a **qualitative research / thematic exploration tool, NOT a recruitment or HR tool**.
+Build an interactive **Mini AI Interviewer** inspired by *Anthropic Interviewer* — a **qualitative research / thematic exploration tool**.
 
-The application conducts short, adaptive interviews (3–5 sequential questions) on a user-selected topic, enriches the answers with dedicated Hugging Face NLP models, produces an AI-generated summary, and persists everything to a local JSON file **and** a Neo4j knowledge graph.
+The application conducts short, adaptive Two-Queue interviews (3–5 main questions + up to 3 contextual follow-up questions) on a user-selected topic, saves each participant's transcript to `data/<user_id>.json`, automatically enriches completed interviews using NLP + local Ollama LLMs, syncs the knowledge graph into **Neo4j**, and visualizes tables & mini-graphs in **NeoDash**.
 
-The system runs as **three Docker microservices** (agent, MCP tools server, Neo4j) plus persistent storage volumes, started with a single `docker compose up`.
+The system runs as **five Docker services** (`agent`, `mcp`, `analysis`, `neo4j`, `neodash`) started with a single `docker compose up -d --build`.
 
 ---
 
-## 2. Functional Requirements (Core + Bonus)
+## 2. Functional Requirements
 
-1. **Session initialization** — The user provides a name/ID and a discussion topic (e.g., *"AI in the workplace"*, *"productivity tools"*, *"scientific research"*).
-2. **Sequential question generation** — The system generates **3–5** open-ended questions, one at a time, each adapted to the topic, the interview rubric, and the user's previous answers.
-3. **Interactive collection** — Answers are collected turn-by-turn in a natural conversation.
-4. **Post-interview summary** — A structured AI-generated summary: key themes, overall sentiment, key points, illustrative quotes.
-5. **Dual persistence**
-   - Every completed session (transcript + summary + NLP scores) is appended to `data/interviews_output.json` (always succeeds if the disk is writable).
-   - Entities and relationships are synchronized into **Neo4j** for graph visualization (best-effort, see graceful degradation).
-6. **Bonus — dedicated Hugging Face models**
-   - Sentiment scoring per answer and per session.
-   - Keyword / keyphrase extraction per answer.
+1. **Session initialization (`intake`)** — The user provides their name and discussion topic (e.g., *"AI productivity"*).
+2. **Two-Queue interview (`main_queue` → `followup_queue`)**
+   - `start_interview` generates 3–5 open-ended main questions, pops Question 1, and creates `data/<user_id>.json` (`status = "in_progress"`, `processed = False`).
+   - On each user answer, deterministic Python code pops the next question from `question_queue`; when `question_queue` is empty, it pops any queued questions from `followup_queue` before finishing.
+   - Users can type `skip` / `pass` / `next`, `stop` / `quit` / `exit` / `end`, or `restart` / `new` / `reset` anytime.
+3. **Completion trigger** — When both queues are empty (or user stops with answers), the state machine sets `phase = "done"`, `status = "pending_analysis"`, `processed = False`.
+4. **Post-interview analysis (`services/analysis`)** — Automatically picks up `phase == "done"` and `processed == False` files:
+   - Per-answer NLP sentiment + keyphrase extraction + aggregated `session_sentiment`.
+   - Full-transcript `summary` and `emotion_and_insights` via Ollama (`json_schema` grammar-constrained outputs, saved raw).
+   - Marks `status = "analyzed"`, `processed = True`.
+5. **Knowledge graph + Dashboard** — Syncs nodes/relationships into Neo4j (`MERGE` idempotent) and exposes interactive tables, charts, and mini-graphs via NeoDash (`services/analysis/dashboards/dashboard.json`).
 
 ---
 
@@ -48,125 +48,76 @@ The system runs as **three Docker microservices** (agent, MCP tools server, Neo4
 
 ```mermaid
 flowchart LR
-    U["User (browser)"] -->|"HTTP :8000 (adk web)"| A["agent service<br/>Google ADK harness"]
-    A -->|"LiteLLM"| L["LLM provider<br/>Ollama (local) or OpenRouter (cloud)"]
-    A -->|"MCP over Streamable HTTP<br/>http://mcp:8001/mcp"| M["mcp service<br/>NLP + storage tools"]
-    M -->|"Bolt :7687"| N[("neo4j service")]
-    M --> J[("data/ volume<br/>interviews_output.json")]
-    M --> H[("hf_cache / baked models")]
-    A --> S[("agent_sessions volume<br/>ADK session DB")]
+    U["User (Browser)"] -->|"HTTP :8000 (adk web)"| A["agent service<br/>Two-Queue LlmAgent"]
+    A -->|"LiteLLM (OpenRouter / Ollama)"| L["Chat LLM"]
+    A -->|"MCP Streamable HTTP<br/>http://mcp:8001/mcp"| M["mcp service<br/>start_interview / push_followup"]
+    M -->|"writes"| J[("./data/<user_id>.json")]
+    A -->|"updates queues"| J
+    J -->|"watches phase=done, processed=false"| AN["analysis service<br/>NLP + Ollama json_schema"]
+    AN -->|"enriches & sets processed=true"| J
+    AN -->|"Bolt :7687 (MERGE)"| N[("neo4j :7474/:7687")]
+    ND["neodash :5005<br/>Tables & Mini-Graphs"] -->|"Bolt :7687"| N
 ```
-
-| Service | Responsibility | Never does |
-|---|---|---|
-| **agent** | Conversation, orchestration (state machine), LLM calls, summary generation | Load ML models, talk to Neo4j, write interview files |
-| **mcp** | Deterministic tools: sentiment, keywords, JSON persistence, Neo4j ingestion | Call an LLM, hold conversation state |
-| **neo4j** | Knowledge graph storage + Browser UI (`:7474`) | — |
 
 ### Guiding principles
-1. **LLM for judgment, code for control.** LLMs phrase questions and write summaries. Counting questions, phase transitions, tool invocation order and persistence are deterministic Python.
-2. **Clear service boundaries.** The agent reaches data *only* through MCP tools. Heavy dependencies (`torch`, `transformers`, `neo4j`) live only in the MCP image.
-3. **JSON first, graph second.** The JSON write is the source of truth; Neo4j is a best-effort projection that can be re-synced.
-4. **Contracts are explicit.** All cross-service payloads are defined in [`DATA_MODEL.md`](DATA_MODEL.md) and validated with Pydantic on both sides.
+1. **LLM for language, Python for state & queues.** The LLM decides question phrasing and when to suggest a `push_followup`. Phase transitions (`STATE_MACHINE_TRANSITIONS`), queue popping (`QUEUE_POP_STRATEGIES`), command handling (`USER_COMMAND_HANDLERS`), and tool exposure (`ALLOWED_TOOLS_BY_PHASE`) are 100% deterministic Python in `shared/contracts/state_machine.py`.
+2. **Prompts in one place.** Every agent phase prompt and analysis prompt lives in `shared/contracts/prompts.py`.
+3. **Decoupled LLM models.** The conversational agent (`LLM_MODEL`) and the post-interview analysis pipeline (`ANALYSIS_LLM_MODEL`, `LLM_MODEL_SUMMARY`, `LLM_MODEL_INSIGHTS`) are configured independently.
+4. **JSON first, Neo4j second.** `data/<user_id>.json` is the source of truth; `neo4j_synced: false` records are automatically retried on the next analysis cycle if Neo4j was temporarily offline.
 
 ---
 
-## 4. Non-Functional Requirements
-
-| Area | Requirement |
-|---|---|
-| Startup | `docker compose up --build` starts the full stack; no manual steps besides creating `.env` |
-| Resilience | Neo4j offline/misconfigured → warning logged, JSON still saved, interview completes normally |
-| Determinism | Question count always within 3–5; NLP + persistence always executed exactly once per completed interview |
-| Privacy | Privacy notice shown before the first question; users are asked not to share PII |
-| Portability | CPU-only inference; runs on Docker Desktop (Windows/WSL2) with ~6 GB RAM allocated |
-| Configuration | All secrets/endpoints via environment variables; nothing hard-coded |
-| Observability | Structured logs per service; `/health` endpoints used by Compose healthchecks |
-| Language | Default models are English. Multilingual models are configurable (see [`MCP_SERVICE.md`](MCP_SERVICE.md)) |
-
----
-
-## 5. Tech Stack
-
-| Layer | Choice |
-|---|---|
-| Agent framework | `google-adk` (custom `BaseAgent` orchestrator + `LlmAgent` sub-agents) |
-| LLM | `LiteLlm` — local Ollama (`ollama_chat/...`) during dev, or cloud via OpenRouter (`openrouter/...`) |
-| Tool protocol | MCP (official `mcp` Python SDK, `FastMCP`, Streamable HTTP transport) |
-| NLP | `transformers`, `torch` (CPU), `keybert`, `sentence-transformers` |
-| Graph DB | Neo4j 5 Community + official `neo4j` Python driver |
-| Validation | `pydantic` v2 |
-| Runtime | Python 3.12+ slim images, Docker Compose v2 |
-
----
-
-## 6. Repository Structure
+## 4. Repository Structure
 
 ```text
-Yonder/                               # repo root
-├── .agents/                          # specs + walkthrough (this folder)
-├── docker-compose.yml
-├── sample.env
-├── .env                              # git-ignored
-├── README.md                         # quick start, architecture summary, Cypher queries
-├── data/                             # bind-mounted into mcp → interviews_output.json
+Yonder/
+├── .agents/                          # Architecture & service specs
+├── docker-compose.yml                # neo4j, neodash, mcp, agent, analysis
+├── sample.env                        # Env template
+├── .env                              # Local env (git-ignored)
+├── pytest.ini
+├── requirements-dev.txt
+├── data/                             # Bind-mounted runtime JSON files (<user_id>.json) + guides
+│   
 ├── shared/
 │   ├── pyproject.toml
-│   └── contracts/                    # single source of truth for Pydantic models
+│   └── contracts/                    # Single source of truth across services
 │       ├── __init__.py
-│       ├── common.py
-│       ├── llm_outputs.py
-│       ├── nlp.py
-│       ├── record.py
-│       └── storage.py
+│       ├── common.py                 # SKIPPED_ANSWER, Score, SentimentLabel, utc_now_iso
+│       ├── llm_outputs.py            # IntakeResult, InterviewSummary, EmotionToneAnalysis
+│       ├── nlp.py                    # Sentiment, Keyword, AnswerAnalysis
+│       ├── prompts.py                # PHASE_PROMPTS + Analysis prompts
+│       └── state_machine.py          # Two-Queue transitions, commands, JSON persistence
 ├── services/
-│   ├── agent/
+│   ├── agent/                        # Google ADK web UI (:8000)
 │   │   ├── Dockerfile
-│   │   ├── requirements.txt          # google-adk, litellm, mcp, pydantic, python-dotenv
-│   │   └── interviewer_app/          # ADK agent package (discovered by `adk web`)
+│   │   ├── requirements.txt
+│   │   └── interviewer_app/
 │   │       ├── __init__.py
 │   │       ├── agent.py              # exposes root_agent
-│   │       ├── config.py             # env + LiteLlm factory (Ollama / OpenRouter)
-│   │       ├── schemas.py            # re-exports from `contracts`
-│   │       ├── orchestrator.py       # InterviewOrchestrator (custom BaseAgent, state machine)
-│   │       └── agents/
-│   │           ├── __init__.py
-│   │           ├── prompts.py        # modular system prompts for each stage
-│   │           ├── intake.py         # IntakeAgent
-│   │           ├── planner.py        # PlannerAgent
-│   │           └── interviewer.py    # InterviewerAgent
-│   └── mcp/
+│   │       ├── config.py             # AgentSettings & build_llm (LiteLlm)
+│   │       └── orchestrator.py       # build_interview_harness + callbacks + dispatch maps
+│   ├── mcp/                          # Streamable HTTP MCP server (:8001)
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt
+│   │   └── mcp_server/
+│   │       ├── __init__.py
+│   │       └── server.py             # start_interview & push_followup MCP tools
+│   └── analysis/                     # Background watcher + NLP/LLM + Neo4j sync
 │       ├── Dockerfile
-│       ├── requirements.txt          # mcp, torch (cpu), transformers, keybert, sentence-transformers, neo4j, pydantic
-│       └── mcp_server/
+│       ├── requirements.txt
+│       ├── dashboards/
+│       │   └── dashboard.json        # Unified NeoDash export (2 pages, 16 cards)
+│       └── analysis_app/
 │           ├── __init__.py
-│           └── server.py             # FastMCP app, tool registration, /health
-├── scripts/
-│   └── try_interview.py              # interactive CLI runner (--mock or live Ollama/OpenRouter)
+│           ├── __main__.py           # CLI (`--watch`, `--force`)
+│           ├── config.py             # AnalysisSettings
+│           ├── nlp_models.py         # SentimentEngine & KeywordEngine
+│           ├── llm_analyzers.py      # Grammar-constrained JSON Schema Ollama/LiteLLM calls
+│           ├── neo4j_store.py        # Idempotent MERGE Cypher sync
+│           └── pipeline.py           # AnalysisPipeline & status/processed watcher
 └── tests/
     ├── test_contracts.py
-    └── test_orchestrator.py
+    ├── test_orchestrator.py
+    └── test_analysis_pipeline.py
 ```
-
----
-
-## 7. Acceptance Criteria (Definition of Done)
-
-- [ ] `docker compose up --build` brings up `agent`, `mcp`, `neo4j`; all healthchecks pass.
-- [ ] Opening `http://localhost:8000` and starting a chat runs a full interview: intake → rubric + privacy notice → 3–5 questions → summary.
-- [ ] Each question is mapped to a rubric area; follow-ups reference the previous answer.
-- [ ] Final message shows: themes, overall sentiment, key points, quotes, per-answer sentiment + keywords, persistence status, and a ready-to-run Cypher query.
-- [ ] `data/interviews_output.json` contains the full record (schema in [`DATA_MODEL.md`](DATA_MODEL.md)).
-- [ ] Neo4j contains the interview graph; `MATCH (n)-[r]->(m) RETURN n, r, m` shows it.
-- [ ] Stopping `neo4j` and running an interview still completes and saves JSON with `neo4j_synced: false`.
-- [ ] Seed command loads 2–3 demo interviews with overlapping users, areas and keywords.
-- [ ] Unit tests for NLP aggregation, JSON store, orchestrator transitions; one e2e test with a stubbed LLM.
-
----
-
-## 8. Out of Scope
-
-- Candidate evaluation, hiring decisions, or any HR scoring.
-- Authentication / multi-tenant user management (single local user context).
-- Production cloud deployment (local Docker only; design should not prevent it).
-- Voice input/output.

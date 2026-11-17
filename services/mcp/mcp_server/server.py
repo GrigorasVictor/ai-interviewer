@@ -33,7 +33,7 @@ def start_interview(
     Args:
         user_name: Participant's name (e.g. 'Victor').
         topic: Subject to discuss (e.g. 'AI in the workplace').
-        questions: 3 to 5 open-ended questions about the topic (each ending with '?').
+        questions: Open-ended questions about the topic (each ending with '?', bounded by INTERVIEW_MIN_QUESTIONS..INTERVIEW_MAX_QUESTIONS).
     """
     state: dict[str, Any] = {"phase": str(Phase.INTAKE)}
     return apply_start_interview_to_state(

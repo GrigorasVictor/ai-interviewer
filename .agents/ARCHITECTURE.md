@@ -1,19 +1,18 @@
 # ARCHITECTURE.md — System Architecture
 
-See [`GOALS.md`](GOALS.md) for requirements. This document describes **how the services fit together**.
+See [`GOALS.md`](GOALS.md) for requirements. This document describes **how the 5 services fit together**.
 
 ---
 
 ## 1. Services
 
-| Service | Image | Exposed to host | Internal address | Owns storage |
+| Service | Image / Build | Host Port | Internal Address | Owns / Mounts |
 |---|---|---|---|---|
-| `agent` | built from `services/agent` | `8000` (ADK web UI + API) | `http://agent:8000` | `agent_sessions` volume (ADK session DB) |
-| `mcp` | built from `services/mcp` | none (optional `8001` in dev for MCP Inspector) | `http://mcp:8001/mcp` | `./data` bind mount, `hf_cache` volume |
+| `agent` | `./services/agent` | `8000` (ADK Web UI) | `http://agent:8000` | `./data:/app/data`, ADK session DB |
+| `mcp` | `./services/mcp` | `8001` (Streamable HTTP) | `http://mcp:8001/mcp` | `./data:/app/data` |
+| `analysis` | `./services/analysis` | — (worker) | — | `./data:/app/data` |
 | `neo4j` | `neo4j:5-community` | `7474` (Browser), `7687` (Bolt) | `bolt://neo4j:7687` | `neo4j_data`, `neo4j_logs` volumes |
-| `ollama` *(optional, profile `local-llm`)* | `ollama/ollama` | none | `http://ollama:11434` | `ollama_models` volume |
-
-All services share one user-defined bridge network: `interviewer_net`.
+| `neodash` | `neo4jlabs/neodash:latest` | `5005` (Dashboard UI) | `http://neodash:5005` | Browser connects to `bolt://localhost:7687` |
 
 ---
 
@@ -22,109 +21,98 @@ All services share one user-defined bridge network: `interviewer_net`.
 ```mermaid
 flowchart TB
     subgraph host["Host machine"]
-        B["Browser"]
-        NB["Neo4j Browser"]
-        DATA[("./data<br/>interviews_output.json")]
+        B["Browser (Chat)"]
+        ND["Browser (NeoDash / Neo4j)"]
+        DATA[("./data/<user_id>.json")]
+        OL["Host Ollama :11434"]
     end
 
-    subgraph net["Docker network: interviewer_net"]
-        AG["agent<br/>adk web :8000<br/>InterviewOrchestrator"]
-        MC["mcp<br/>FastMCP :8001 /mcp<br/>/health"]
+    subgraph docker["Docker Compose stack"]
+        AG["agent :8000<br/>Google ADK LlmAgent"]
+        MC["mcp :8001/mcp<br/>MCPServer (start_interview, push_followup)"]
+        AN["analysis (watcher)<br/>NLP + Ollama json_schema"]
         NJ[("neo4j<br/>:7474 / :7687")]
-        OL["ollama :11434<br/>(local LLM)"]
+        DASH["neodash :5005<br/>Dashboard UI"]
     end
 
-    OR["OpenRouter API<br/>(optional cloud LLM)"]
+    OR["OpenRouter API"]
 
-    B -->|"HTTP"| AG
-    NB -->|"HTTP + Bolt"| NJ
+    B -->|"HTTP :8000"| AG
     AG -->|"MCP Streamable HTTP"| MC
-    AG -->|"LiteLLM"| OL
-    AG -.->|"LiteLLM (alt)"| OR
-    MC -->|"Bolt"| NJ
-    MC -->|"atomic write"| DATA
+    AG -.->|"LiteLLM"| OR
+    AG -.->|"LiteLLM"| OL
+    MC -->|"read/write"| DATA
+    AG -->|"queue updates"| DATA
+    AN -->|"poll phase=done & processed=false"| DATA
+    AN -->|"LiteLLM json_schema"| OL
+    AN -->|"Bolt MERGE"| NJ
+    ND -->|"HTTP :5005"| DASH
+    ND -->|"Bolt :7687 (client-side)"| NJ
 ```
 
 ### Communication matrix
 
 | From → To | Protocol | Purpose | Failure handling |
 |---|---|---|---|
-| Browser → agent | HTTP / SSE (`adk web`) | Chat UI | — |
-| agent → LLM | HTTP (Ollama) or HTTPS (OpenRouter) via `LiteLlm` | Intake, planning, questions, summary | Validated with Pydantic; deterministic fallback if a small local model returns malformed JSON |
-| agent → mcp | MCP over Streamable HTTP | NLP + persistence tools | Timeout 60 s for NLP, 30 s for save; 1 retry; surfaced to user if still failing |
-| mcp → neo4j | Bolt | Graph ingestion | Non-fatal; record saved with `neo4j_synced: false` |
-| mcp → disk | File I/O | JSON persistence | Fatal for `save_interview` (returns error status) |
+| Browser → `agent` | HTTP / SSE (`adk web`) | Conversational UI & session state | ADK `RetryConfig` (3 attempts) on node errors |
+| `agent` → Chat LLM | HTTPS (OpenRouter) or HTTP (Ollama) | Intake extraction, question phrasing, follow-up decision | `_filter_tools` strips empty `Tool` wrappers & `thought` parts to prevent 400 errors |
+| `agent` → `mcp` | MCP Streamable HTTP (`/mcp`) | Invoke `start_interview` and `push_followup` | Tool availability strictly gated per phase via `ALLOWED_TOOLS_BY_PHASE` |
+| `mcp` & `agent` → `./data` | File I/O | Persist `data/<user_id>.json` | Written after every phase transition & queue pop |
+| `analysis` → `./data` | File polling (`5s`) | Detect `phase == "done"` and `processed == False` | Skips `in_progress` and already `processed: True` files |
+| `analysis` → Ollama | HTTP (`OLLAMA_API_BASE`) | Raw JSON outputs for Summary & Emotion/Insights | Grammar-constrained via `response_format={"type": "json_schema", ...}` |
+| `analysis` → `neo4j` | Bolt (`bolt://neo4j:7687`) | Idempotent graph `MERGE` | Non-fatal: saves JSON with `neo4j_synced: false` and retries later |
 
 ---
 
-## 3. Responsibility Boundaries
-
-- **agent** is the only service that talks to an LLM and the only one that keeps conversation state.
-- **mcp** is the only service that touches `data/` and Neo4j, and the only one with ML dependencies.
-- **neo4j** is passive storage; schema constraints are created by `mcp` at startup (idempotent).
-- Contracts between `agent` and `mcp` live in the shared `shared/contracts/` package (installed in both environments) and are documented in [`DATA_MODEL.md`](DATA_MODEL.md).
-
----
-
-## 4. End-to-End Flow (one interview)
+## 3. End-to-End Flow (One Interview)
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant AG as agent (Orchestrator)
-    participant LLM as LLM (Ollama / OpenRouter)
-    participant MC as mcp
-    participant NJ as neo4j
+    participant AG as agent (LlmAgent + State Machine)
+    participant MC as mcp (:8001/mcp)
+    participant FS as data/<user_id>.json
+    participant AN as analysis (watcher)
+    participant NJ as neo4j (:7687)
 
-    User->>AG: "Hi, I'm Ana, topic: AI in the workplace"
-    AG->>LLM: IntakeAgent (extract name + topic)
-    AG->>LLM: PlannerAgent (build rubric, 3-5 areas)
-    AG->>LLM: InterviewerAgent (Question 1)
-    AG-->>User: Rubric areas + privacy notice + Question 1
-    loop 3-5 questions
-        User->>AG: answer
-        AG->>AG: validate answer, append to transcript, q_index++
-        alt more questions needed
-            AG->>LLM: InterviewerAgent (next question + area)
-            AG-->>User: next question
+    User->>AG: "Hi, I'm Andrei, topic: AI productivity"
+    AG->>MC: start_interview(user_name="Andrei", topic="AI productivity", questions=[Q1, Q2, Q3])
+    Note over AG: after_tool_callback updates ADK state & pops Q1
+    MC->>FS: save status="in_progress", phase="main_queue", processed=false
+    AG-->>User: Greeting + privacy note + Q1
+
+    loop While question_queue or followup_queue has items
+        User->>AG: answer (or "skip")
+        Note over AG: before_agent_callback calls advance_queues_on_user_answer()
+        AG->>FS: append transcript turn, pop next question
+        opt Optional in main_queue after answer
+            AG->>MC: push_followup(follow_up_question, referenced_answer)
+            Note over AG: after_tool_callback appends to followup_queue
         end
+        AG-->>User: Acknowledge + next question
     end
-    AG->>MC: analyze_answers(answers)
-    MC-->>AG: per-answer sentiment + keywords, session sentiment
-    AG->>LLM: SummarizerAgent (rubric + transcript + NLP)
-    AG->>MC: save_interview(record)
-    MC->>MC: atomic write to interviews_output.json
-    MC->>NJ: MERGE graph (single transaction)
-    NJ-->>MC: ok / unavailable
-    MC-->>AG: {json_file: ok, neo4j: ok|skipped|error, cypher_query}
-    AG-->>User: Summary + NLP metrics + persistence status + Cypher query
+
+    User->>AG: final answer (or "stop")
+    Note over AG: Both queues empty -> phase="done", status="pending_analysis", processed=false
+    AG->>FS: write final transcript
+    AG-->>User: Warm thank-you & closing message
+
+    AN->>FS: Detects phase="done" & processed=false
+    AN->>AN: SentimentEngine + KeywordEngine per turn + Session Sentiment
+    AN->>AN: Ollama Summary LLM + Insights LLM (json_schema)
+    AN->>NJ: Idempotent MERGE transaction
+    AN->>FS: Write analysis_report + status="analyzed" + processed=true
 ```
 
 ---
 
-## 5. Failure Modes
+## 4. Key Design Decisions
 
-| Scenario | Expected behavior |
-|---|---|
-| Neo4j down or not configured | `mcp` starts anyway (health reports `neo4j: down`); `save_interview` writes JSON, returns `neo4j.status = "skipped"`; user sees a warning line |
-| `mcp` down at agent startup | `agent` waits (Compose `depends_on: service_healthy`) |
-| `mcp` down mid-interview | Questions continue (no MCP needed); at analysis, retry once, then tell the user analysis failed and keep `phase = analysis` so the next message retries |
-| LLM returns invalid structured output | Caught in orchestrator → deterministic fallback (regex intake / default 3-area rubric / generic question for the next uncovered area) so the interview never crashes |
-| User sends empty / one-word answer | One clarification request that does **not** consume a question slot |
-| Agent container restarts mid-interview | Session restored from `agent_sessions` (SQLite); orchestrator resumes from `phase` |
-| Duplicate save (retry after timeout) | Idempotent: `interview_id` is the key in JSON and in Neo4j `MERGE` |
-
----
-
-## 6. Key Design Decisions
-
-| # | Decision | Rationale | Alternatives rejected |
-|---|---|---|---|
-| D1 | Separate `mcp` microservice for tools | Isolates heavy ML deps, models loaded once and kept warm, independently scalable/testable, reusable by other MCP clients | In-process `FunctionTool`s (bloats agent image, couples lifecycles) |
-| D2 | MCP over **Streamable HTTP** (not stdio) | Containers cannot spawn each other's processes; HTTP is the standard remote MCP transport | stdio (only works in one container), SSE (legacy) |
-| D3 | Custom `BaseAgent` orchestrator as a **state machine** | Interviews span many user turns; `SequentialAgent`/`LoopAgent` run to completion in one turn; LLM-driven transfer is non-deterministic | `SequentialAgent`, `LoopAgent`, LLM coordinator with `transfer_to_agent` |
-| D4 | NLP + persistence called **deterministically** from code | Guarantees exactly-once execution; avoids `output_schema` + tools conflicts | LLM deciding when to call tools |
-| D5 | JSON-first, Neo4j best-effort with `neo4j_synced` flag | Meets "simple storage" requirement unconditionally; graph can be re-synced later | Neo4j as source of truth |
-| D6 | Models baked into the `mcp` image at build time | Fast, offline, deterministic startup | Download on first request (slow, needs internet at runtime) |
-| D7 | Sub-agents use `include_contents="none"` + state templating | Each LLM call gets exactly the context it needs; smaller prompts, works with small local models | Full conversation history in every call |
-| D8 | Provider-agnostic LLM via `LiteLlm` only | Same code runs against local Ollama (`ollama_chat/...`) and cloud OpenRouter (`openrouter/...`) by changing `.env` | Provider-specific SDKs |
+| # | Decision | Rationale |
+|---|---|---|
+| D1 | **Two-Queue deterministic state machine** (`question_queue` → `followup_queue` → `done`) | Eliminates LLM drift in question counting and guarantees follow-ups happen only after main questions finish |
+| D2 | **Single `LlmAgent` + ADK callbacks** (`_on_user_turn`, `_filter_tools`, `_on_tool_result`) | Keeps ADK Web UI event stream unified while enforcing Python state transitions and per-phase tool visibility |
+| D3 | **Empty `Tool` stripping in `_filter_tools`** | ADK's `lite_llm.py` serializes `Tool(function_declarations=[])` without `"type": "function"`, causing OpenRouter/Nvidia 400 errors; removing empty `Tool` entries while keeping `tools_dict` intact solves both 400s and `Tool not found` warnings |
+| D4 | **Status/flag-driven async analysis (`processed: false/true`)** | Completely separates fast conversational turns from slower NLP + local Ollama analysis (`services/analysis`) without file-hash sidecars |
+| D5 | **Grammar-constrained `json_schema` + raw output storage** | Prevents Pydantic `ValidationError` drops on local Ollama models by enforcing JSON fields at token-sampling time and storing raw JSON |
+| D6 | **Independent LLM configs** (`LLM_MODEL` vs `ANALYSIS_LLM_MODEL` / `LLM_MODEL_SUMMARY` / `LLM_MODEL_INSIGHTS`) | Conversational agent can use fast cloud OpenRouter while post-interview analysis uses local Ollama models (`mimo-v2.6:9b` + `qwen3:1.7b`) |

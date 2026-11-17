@@ -21,7 +21,11 @@ from typing import Any
 from contracts import SKIPPED_ANSWER, AnswerAnalysis, Sentiment, utc_now_iso
 
 from .config import AnalysisSettings, load_analysis_settings
-from .llm_analyzers import generate_ai_summary, generate_emotion_and_insights
+from .llm_analyzers import (
+    _build_multi_model_context,
+    generate_ai_summary,
+    generate_emotion_and_insights,
+)
 from .neo4j_store import Neo4jGraphStore
 from .nlp_models import KeywordEngine, SentimentEngine
 
@@ -135,15 +139,26 @@ class AnalysisPipeline:
             session_sentiment.score,
         )
 
+        record["transcript"] = transcript
+
         logger.info("  [Summary LLM] Calling '%s' for full-transcript summary...", self.settings.summary_model)
         summary = self.summary_fn(record, session_sentiment, self.settings)
         logger.info("  [Summary LLM] Raw output -> %s", json.dumps(summary, ensure_ascii=False))
+
+        # Attach upstream Summary LLM output before running Insights LLM so multi-model context includes it
+        record.setdefault("analysis_report", {})["summary"] = summary
+        insights_ctx = _build_multi_model_context(record, session_sentiment, summary=summary)
+        logger.info(
+            "  [Insights Context Engineering] trajectory=%s | contrasts=%s | top_keywords=%s",
+            insights_ctx["sentiment_trajectory"],
+            insights_ctx["sentiment_contrasts"],
+            insights_ctx["top_keywords"],
+        )
 
         logger.info("  [Insights LLM] Calling '%s' for emotion, tone & actionable insights...", self.settings.insights_model)
         insights = self.insights_fn(record, session_sentiment, self.settings)
         logger.info("  [Insights LLM] Raw output -> %s", json.dumps(insights, ensure_ascii=False))
 
-        record["transcript"] = transcript
         record["status"] = "analyzed"
         record["processed"] = True
         record["analysis_report"] = {

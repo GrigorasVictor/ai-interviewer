@@ -73,7 +73,7 @@ You are an expert qualitative research analyst. Return ONLY a valid JSON object 
   "themes": ["theme 1", "theme 2"],
   "key_points": ["point 1", "point 2"],
   "quotes": ["verbatim quote from answers"],
-  "sentiment_explanation": "1-2 sentences explaining the overall sentiment"
+  "sentiment_explanation": "1-2 sentences explaining the overall sentiment and any shifts across answers"
 }
 Rules: `themes` must have 2-5 items, `key_points` must have 2-6 items, `quotes` 0-3 verbatim quotes.
 """
@@ -82,28 +82,52 @@ SUMMARY_USER_PROMPT = """\
 Participant: {user_name}
 Topic: {topic}
 Overall NLP Sentiment: {sentiment_label} ({sentiment_score})
+Per-Turn Sentiment Distribution: {sentiment_distribution}
+Sentiment Trajectory: {sentiment_trajectory}
+Top Extracted Keyphrases: {top_keywords}
 
-Transcript:
+Annotated Transcript:
 {transcript_text}
 """
 
 INSIGHTS_SYSTEM_PROMPT = """\
-You are an organizational psychologist and insights AI. Analyze the interview transcript and return ONLY a valid JSON object:
+You are an organizational psychologist and behavioral insights AI.
+You receive an interview transcript enriched with telemetry from specialized upstream models:
+1. Per-answer and session-level sentiment polarity & confidence scores (`SentimentEngine`).
+2. Per-answer and session-level salient keyphrases with relevance scores (`KeywordEngine`).
+3. Qualitative themes and sentiment explanation from the upstream Summary LLM (`InterviewSummary`).
+
+Synthesize ALL of these signals before generating your psychological & actionable assessment:
+- Do NOT default to a bland, generic emotion (like plain "optimism" or "neutral") just from the session label. Look at the **Sentiment Trajectory** and **Contrast**: if the user starts positive on benefits but drops to neutral/negative on specific workflow bottlenecks or follow-ups, capture the exact nuanced emotion (e.g. "cautious optimism", "pragmatic frustration", "skeptical appreciation", "ambivalent relief").
+- Calibrate `confidence_level` ("high" | "medium" | "low") and `communication_tone` using answer specificity, keyword density, skipped turns, and hesitation in follow-up answers.
+- Ground `pain_points` and `actionable_recommendations` directly in the answers and keyphrases where sentiment dropped or friction was expressed.
+
+Return ONLY a valid JSON object matching this exact schema:
 {
-  "dominant_emotion": "single emotion label (e.g. optimism, pragmatism, frustration, curiosity)",
-  "communication_tone": "short description of tone (e.g. direct and practical)",
+  "dominant_emotion": "specific, nuanced emotion label grounded in the sentiment trajectory (e.g. cautious optimism, pragmatic frustration, skeptical curiosity)",
+  "communication_tone": "short description of tone (e.g. candid and pragmatic, brief and hesitant on follow-ups)",
   "confidence_level": "high | medium | low",
-  "pain_points": ["challenge or trade-off 1", "challenge 2"],
-  "actionable_recommendations": ["concrete recommendation 1", "recommendation 2"]
+  "pain_points": ["concrete challenge or friction point 1", "challenge 2"],
+  "actionable_recommendations": ["concrete, targeted recommendation 1", "recommendation 2"]
 }
 """
 
 INSIGHTS_USER_PROMPT = """\
 Participant: {user_name}
 Topic: {topic}
-Detected Sentiment: {sentiment_label} ({sentiment_score})
 
-Transcript:
+### 1. Specialized Upstream Model Predictions (Multi-Model Context)
+- **Session Sentiment (`SentimentEngine`):** {sentiment_label} (score={sentiment_score})
+- **Per-Turn Polarity Breakdown:** {sentiment_distribution}
+- **Sentiment Trajectory Across Interview:** {sentiment_trajectory}
+- **Polarity Contrasts & Friction Signals:** {sentiment_contrasts}
+- **Top Salient Keyphrases (`KeywordEngine`):** {top_keywords}
+- **Upstream Summary LLM Synthesis:**
+  - *Sentiment Explanation:* {summary_sentiment_explanation}
+  - *Identified Themes:* {summary_themes}
+  - *Key Points:* {summary_key_points}
+
+### 2. Annotated Transcript (with Per-Answer NLP Sentiment & Keywords)
 {transcript_text}
 """
 

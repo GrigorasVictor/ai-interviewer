@@ -4,11 +4,24 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.request import urlopen
 
-from analysis_app.llm_analyzers import _build_json_schema_response_format
+from analysis_app.llm_analyzers import (
+    _build_json_schema_response_format,
+    _build_multi_model_context,
+    generate_ai_summary,
+    generate_emotion_and_insights,
+)
 from analysis_app.neo4j_store import build_neo4j_parameters
 from analysis_app.pipeline import AnalysisPipeline
-from contracts import EmotionToneAnalysis, InterviewSummary
+from contracts import (
+    INSIGHTS_SYSTEM_PROMPT,
+    INSIGHTS_USER_PROMPT,
+    SUMMARY_SYSTEM_PROMPT,
+    SUMMARY_USER_PROMPT,
+    EmotionToneAnalysis,
+    InterviewSummary,
+)
 
 
 def _sample_interview(user_id: str = "andrei", *, phase: str = "done") -> dict:
@@ -69,6 +82,14 @@ def _stub_insights(record, session_sentiment, settings) -> dict:
         "pain_points": ["Still need to debug edge cases"],
         "actionable_recommendations": ["Combine AI code generation with automated edge-case tests"],
     }
+
+
+def _is_ollama_reachable(api_base: str) -> bool:
+    try:
+        with urlopen(f"{api_base.rstrip('/')}/api/tags", timeout=1.0) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 def test_json_schema_response_format_builds_strict_grammar_schema() -> None:
@@ -133,3 +154,73 @@ def test_analysis_pipeline_waits_for_done_then_sets_processed_flag(tmp_path: Pat
     assert summary2["analyzed"] == []
     assert summary2["already_processed"] == ["andrei.json"]
     assert summary2["skipped_in_progress"] == ["victor.json"]
+
+
+def test_sample_interview_injected_prompts() -> None:
+    """Print the injected prompts and outputs strictly for `_sample_interview()` (live Ollama if up, else stub)."""
+    captured_runs: list[tuple[str, str, str, str, dict]] = []
+
+    def capture_summary(record, session_sentiment, settings) -> dict:
+        ctx = _build_multi_model_context(record, session_sentiment)
+        use_live = not settings.summary_model.startswith(("ollama/", "ollama_chat/")) or _is_ollama_reachable(
+            settings.ollama_api_base
+        )
+        if use_live:
+            output = generate_ai_summary(record, session_sentiment, settings)
+            source = f"LIVE ({settings.summary_model})"
+        else:
+            output = _stub_summary(record, session_sentiment, settings)
+            source = "STUB (Ollama offline)"
+        captured_runs.append(
+            ("1. SUMMARY LLM", source, SUMMARY_SYSTEM_PROMPT, SUMMARY_USER_PROMPT.format(**ctx), output)
+        )
+        return output
+
+    def capture_insights(record, session_sentiment, settings) -> dict:
+        ctx = _build_multi_model_context(record, session_sentiment)
+        use_live = not settings.insights_model.startswith(("ollama/", "ollama_chat/")) or _is_ollama_reachable(
+            settings.ollama_api_base
+        )
+        if use_live:
+            output = generate_emotion_and_insights(record, session_sentiment, settings)
+            source = f"LIVE ({settings.insights_model})"
+        else:
+            output = _stub_insights(record, session_sentiment, settings)
+            source = "STUB (Ollama offline)"
+        captured_runs.append(
+            ("2. INSIGHTS LLM", source, INSIGHTS_SYSTEM_PROMPT, INSIGHTS_USER_PROMPT.format(**ctx), output)
+        )
+        return output
+
+    pipeline = AnalysisPipeline(
+        summary_fn=capture_summary,
+        insights_fn=capture_insights,
+        sync_neo4j=False,
+    )
+    analyzed = pipeline.analyze_record(_sample_interview())
+
+    border = "=" * 80
+    sub_border = "-" * 80
+    for title, source, system_prompt, user_prompt, output in captured_runs:
+        print(f"\n{border}")
+        print(f"  {title} [{source}]")
+        print(border)
+        print("[SYSTEM PROMPT]")
+        print(system_prompt.strip())
+        print(sub_border)
+        print("[USER PROMPT]")
+        print(user_prompt.strip())
+        print(sub_border)
+        print("[OUTPUT]")
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+        print(f"{border}\n")
+
+    print(f"\n{border}")
+    print("  3. FINAL ANALYSIS REPORT OUTPUT")
+    print(border)
+    print(json.dumps(analyzed["analysis_report"], indent=2, ensure_ascii=False))
+    print(f"{border}\n")
+
+    assert len(captured_runs) == 2
+    assert "Sentiment Trajectory Across Interview:" in captured_runs[1][3]
+    assert "Upstream Summary LLM Synthesis:" in captured_runs[1][3]

@@ -12,7 +12,6 @@ from typing import Any
 
 from contracts import (
     ALLOWED_TOOLS_BY_PHASE,
-    MIN_QUESTIONS,
     PHASE_PROMPTS,
     RESTART_COMMANDS,
     STATE_MACHINE_TRANSITIONS,
@@ -65,12 +64,15 @@ def build_harness_instruction(ctx: ReadonlyContext) -> str:
     """Format `PHASE_PROMPTS[phase]` with the current state variables."""
     s = ctx.state
     phase = str(Phase(s.get("phase", Phase.INTAKE)))
-    override = s.get("num_questions_override") or load_settings().num_questions_override
+    settings = load_settings()
+    override = s.get("num_questions_override") or settings.num_questions_override
     return PHASE_PROMPTS[phase].format(
         user_name=s.get("user_name") or "(unknown)",
         user_id=s.get("user_id") or "(unknown)",
         topic=s.get("topic") or "(unknown)",
-        target_questions=int(override) if override is not None else MIN_QUESTIONS,
+        target_questions=int(override) if override is not None else settings.min_questions,
+        min_questions=settings.min_questions,
+        max_questions=settings.max_questions,
         current_question=s.get("current_question") or "(None)",
         current_followup_context=s.get("current_followup_context") or "your earlier point",
         last_answered_question=s.get("last_answered_question") or "(None)",
@@ -173,7 +175,6 @@ __all__ = [
     "Phase",
     "STATE_MACHINE_TRANSITIONS",
     "Signal",
-    "TOOL_RESULT_HANDLERS",
     "advance_queues_on_user_answer",
     "build_harness_instruction",
     "build_interview_harness",

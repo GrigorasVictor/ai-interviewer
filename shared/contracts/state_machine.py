@@ -123,6 +123,28 @@ def _normalize_question(raw_question: str) -> str:
     return f"{cleaned.rstrip('?')}?" if cleaned else ""
 
 
+def _parse_positive_int_env(var_name: str, default: int) -> int:
+    raw = os.getenv(var_name, "").strip()
+    if not raw:
+        return default
+    value = int(raw)
+    if value < 1:
+        raise ValueError(f"{var_name} must be >= 1, got {value}")
+    return value
+
+
+def parse_min_questions_env() -> int:
+    """Return `INTERVIEW_MIN_QUESTIONS` (default `MIN_QUESTIONS = 3`)."""
+    return _parse_positive_int_env("INTERVIEW_MIN_QUESTIONS", MIN_QUESTIONS)
+
+
+def parse_max_questions_env() -> int:
+    """Return `INTERVIEW_MAX_QUESTIONS` (default `MAX_QUESTIONS = 5`), clamped to `>= min_questions`."""
+    min_q = parse_min_questions_env()
+    max_q = _parse_positive_int_env("INTERVIEW_MAX_QUESTIONS", MAX_QUESTIONS)
+    return max(min_q, max_q)
+
+
 def parse_num_questions_env() -> int | None:
     raw = os.getenv("INTERVIEW_NUM_QUESTIONS", "").strip()
     return max(1, int(raw)) if raw else None
@@ -180,12 +202,13 @@ def finish_and_persist_if_needed(state: Any, signal: Signal) -> Phase:
 def reset_interview_state(state: Any) -> dict[str, Any]:
     """Reset the user's state back to `intake`."""
     override = state.get("num_questions_override") or parse_num_questions_env()
+    min_questions = parse_min_questions_env()
     state.update({key: None for key in PERSISTED_KEYS})
     state.update(
         {
             "phase": str(Phase.INTAKE),
             "processed": False,
-            "target_questions": override or MIN_QUESTIONS,
+            "target_questions": override or min_questions,
             "question_queue": [],
             "followup_queue": [],
             "last_answered_question": None,
@@ -249,10 +272,11 @@ def apply_start_interview_to_state(
             "next_step": "Ask the user in plain text for their name and the topic they want to discuss.",
         }
 
+    min_questions = parse_min_questions_env()
+    max_questions = parse_max_questions_env()
     override = state.get("num_questions_override") or parse_num_questions_env()
-    target_count = int(override) if override is not None else MIN_QUESTIONS
     cleaned_questions = list(dict.fromkeys(filter(None, (_normalize_question(q) for q in (questions or [])))))
-    required_min = min(target_count, MIN_QUESTIONS)
+    required_min = int(override) if override is not None else min_questions
 
     if len(cleaned_questions) < required_min:
         transition_phase(state, Signal.NEED_MORE_INFO)
@@ -265,7 +289,7 @@ def apply_start_interview_to_state(
             ),
         }
 
-    max_allowed = int(override) if override is not None else MAX_QUESTIONS
+    max_allowed = int(override) if override is not None else max_questions
     queue = cleaned_questions[:max_allowed]
     first_question = queue.pop(0)
 

@@ -4,7 +4,10 @@
 .venv
 .agents
 .env
-sample.env
+sample-local.env
+sample-cloud.env
+sample-hybrid.env
+ollama
 data
 tests
 my_agent
